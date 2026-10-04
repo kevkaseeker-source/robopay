@@ -210,6 +210,7 @@ crash and a power/temperature monitor.
 | `CAMERA_FPS` | `2.5` | Camera frame rate (keeps the Pi 5 cool) |
 | `MACHINE_ID`, `PEAQ_RPC_URL` | unset | Pay the peaq Machine-NFT owner instead of `SELLER_PUBKEY` |
 | `MACHINE_TOKEN` | required | Shared secret the car sends to the buyer app's machine endpoints (`/active_order`, `/delivered`, …); the buyer app refuses to start without it |
+| `JURY_USERNAME`, `JURY_PASSWORD`, `JURY_EXPIRES` | unset | Optional second, time-limited login for judges; rejected automatically after `JURY_EXPIRES` (YYYY-MM-DD) |
 
 ### Tests
 

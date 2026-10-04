@@ -5,6 +5,7 @@ owner/seller each get their own app with their own login, matching their
 actual separate roles (see SETUP_AND_ARCHITECTURE.md).
 """
 
+import datetime
 import functools
 import hashlib
 import json
@@ -165,18 +166,41 @@ def require_machine_token(app, paths, token_env="MACHINE_TOKEN"):
         return None
 
 
+def _jury_login():
+    """Optional second, time-limited login for hackathon judges.
+
+    Set JURY_USERNAME, JURY_PASSWORD and JURY_EXPIRES (YYYY-MM-DD, last valid
+    day) in an app's environment to let judges in without sharing the team's
+    own login. After the expiry date the jury login is rejected automatically.
+    A missing or malformed JURY_EXPIRES disables it rather than making it
+    permanent. Returns (username, password, expiry_date) or None.
+    """
+    user, pw, expires = (os.environ.get(k, "") for k in ("JURY_USERNAME", "JURY_PASSWORD", "JURY_EXPIRES"))
+    if not user or not pw:
+        return None
+    try:
+        return user, pw, datetime.date.fromisoformat(expires)
+    except ValueError:
+        print(f"JURY_EXPIRES={expires!r} is not a YYYY-MM-DD date - jury login disabled.")
+        return None
+
+
 def make_auth(app, username_env, password_env, exempt_paths=()):
     username = os.environ.get(username_env)
     password = os.environ.get(password_env)
     if not username or not password:
         raise RuntimeError(f"Set {username_env} and {password_env} before starting this app.")
 
+    jury = _jury_login()
+
     @app.before_request
     def _check_auth():
         if request.path in exempt_paths:
             return None
         auth = request.authorization
-        ok = auth and secrets.compare_digest(auth.username, username) and secrets.compare_digest(auth.password, password)
+        ok = auth and secrets.compare_digest(auth.username or "", username) and secrets.compare_digest(auth.password or "", password)
+        if not ok and auth and jury and datetime.date.today() <= jury[2]:
+            ok = secrets.compare_digest(auth.username or "", jury[0]) and secrets.compare_digest(auth.password or "", jury[1])
         if not ok:
             return Response(
                 "Login erforderlich", 401,
