@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+venv/
+drone-env/
+rpi/FIX_ANLEITUNG.md
+
+# Environment & Secrets
+.env
+*.key
+*.pem
+
+# Solana / Anchor
+target/
+
+# JSON (keypairs etc.)
+*.json
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Sensor data captures (car/sensor_logger.py)
+car/sensor_data/

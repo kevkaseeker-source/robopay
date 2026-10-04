@@ -1,0 +1,4 @@
+pymavlink>=2.4.40
+solana>=0.34.0
+solders>=0.21.0
+flask>=3.0.0

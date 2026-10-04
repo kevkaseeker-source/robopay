@@ -1,0 +1,880 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Drone Delivery</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0a0a14;
+      color: #e2e2f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px 16px 48px;
+    }
+    .header { text-align: center; margin-bottom: 24px; }
+    .logo { font-size: 52px; margin-bottom: 10px; }
+    h1 { font-size: 26px; font-weight: 700; }
+    .subtitle { color: #666; font-size: 14px; margin-top: 4px; }
+
+    .card {
+      background: #12121e;
+      border: 1px solid #22223a;
+      border-radius: 20px;
+      padding: 24px;
+      width: 100%;
+      max-width: 400px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .section-label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #555;
+      margin-bottom: 6px;
+    }
+
+    /* Wallet row */
+    .wallet-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .wallet-addr {
+      font-family: monospace;
+      font-size: 13px;
+      color: #a0a0c8;
+      flex: 1;
+      background: none;
+      border: none;
+      outline: none;
+      cursor: text;
+      min-width: 0;
+    }
+    .copy-btn {
+      background: #1e1e38;
+      border: 1px solid #2a2a4a;
+      color: #888;
+      padding: 5px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .copy-btn:active { opacity: 0.7; }
+
+    /* Wallet backup */
+    .backup-toggle {
+      background: none;
+      border: none;
+      color: #444;
+      font-size: 12px;
+      cursor: pointer;
+      text-align: left;
+      padding: 2px 0 0;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+    .backup-toggle:hover { color: #666; }
+    .backup-panel {
+      display: none;
+      background: #080810;
+      border: 1px solid #1e1e3a;
+      border-radius: 12px;
+      padding: 14px;
+      margin-top: 4px;
+    }
+    .backup-panel.open { display: block; }
+    .backup-label { font-size: 11px; color: #555; margin-bottom: 6px; }
+    .backup-key {
+      font-family: monospace;
+      font-size: 11px;
+      color: #6366f1;
+      word-break: break-all;
+      background: #0d0d1a;
+      padding: 10px;
+      border-radius: 8px;
+      margin-bottom: 8px;
+      line-height: 1.5;
+    }
+    .restore-row {
+      display: flex;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .restore-input {
+      flex: 1;
+      background: #0d0d1a;
+      border: 1px solid #2a2a4a;
+      color: #c0c0d8;
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-family: monospace;
+    }
+    .restore-input::placeholder { color: #333; }
+    .restore-btn {
+      background: #1e1e38;
+      border: 1px solid #2a2a4a;
+      color: #a0a0c8;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .restore-btn:active { opacity: 0.7; }
+
+    /* Balance */
+    .balance-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .balance-amount {
+      font-size: 22px;
+      font-weight: 700;
+      color: #fff;
+    }
+    .balance-amount.low { color: #f87171; }
+
+    .airdrop-btn {
+      background: #1a2e1a;
+      border: 1px solid #2a5a2a;
+      color: #4ade80;
+      padding: 8px 14px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .airdrop-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .airdrop-btn:active { opacity: 0.7; }
+
+    /* Delivery info */
+    .info-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .info-cell {
+      background: #0d0d1a;
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .info-value {
+      font-size: 16px;
+      font-weight: 700;
+      color: #fff;
+    }
+    .info-sub {
+      font-size: 11px;
+      color: #555;
+      margin-top: 2px;
+    }
+
+    /* GPS */
+    .gps-box {
+      background: #0d0d1a;
+      border-radius: 12px;
+      padding: 14px;
+      font-size: 13px;
+      color: #888;
+      min-height: 48px;
+      display: flex;
+      align-items: center;
+    }
+    .gps-box.ready { color: #4ade80; }
+    .gps-box.error { color: #f87171; }
+
+    /* Order button */
+    .order-btn {
+      width: 100%;
+      padding: 18px;
+      border: none;
+      border-radius: 14px;
+      font-size: 17px;
+      font-weight: 700;
+      cursor: pointer;
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      color: white;
+      transition: opacity 0.2s, transform 0.1s;
+      letter-spacing: 0.02em;
+    }
+    .order-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+    .order-btn:not(:disabled):active { transform: scale(0.97); }
+
+    /* Spinner */
+    .spinner {
+      display: none;
+      margin: 4px auto 0;
+      width: 24px;
+      height: 24px;
+      border: 3px solid #222;
+      border-top-color: #6366f1;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Status panel */
+    .status-panel {
+      display: none;
+      background: #0d0d1a;
+      border-radius: 14px;
+      padding: 16px;
+      font-size: 14px;
+    }
+    .status-panel.show { display: block; }
+    .status-line {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 0;
+    }
+    .status-line + .status-line { border-top: 1px solid #1a1a2e; }
+    .status-icon { font-size: 18px; flex-shrink: 0; }
+    .status-text { flex: 1; color: #c0c0d8; }
+    .tx-link {
+      display: inline-block;
+      margin-top: 3px;
+      color: #6366f1;
+      font-size: 11px;
+      font-family: monospace;
+      text-decoration: none;
+      word-break: break-all;
+    }
+    .tx-link:hover { color: #818cf8; }
+
+    /* Delivery confirmed banner */
+    .delivered-banner {
+      display: none;
+      background: linear-gradient(135deg, #14532d, #1a3a1a);
+      border: 1px solid #4ade80;
+      border-radius: 14px;
+      padding: 20px;
+      text-align: center;
+    }
+    .delivered-banner.show { display: block; }
+    .delivered-emoji { font-size: 42px; margin-bottom: 8px; }
+    .delivered-title { font-size: 20px; font-weight: 700; color: #4ade80; margin-bottom: 4px; }
+    .delivered-sub { font-size: 13px; color: #86efac; }
+
+    /* Divider */
+    .divider { border: none; border-top: 1px solid #1a1a2e; }
+
+    /* Toast */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(80px);
+      background: #1e3a1e;
+      border: 1px solid #4ade80;
+      color: #4ade80;
+      padding: 12px 20px;
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 600;
+      transition: transform 0.3s ease;
+      z-index: 999;
+      white-space: nowrap;
+    }
+    .toast.show { transform: translateX(-50%) translateY(0); }
+
+    .powered { margin-top: 28px; font-size: 11px; color: #333; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo">🚁</div>
+    <h1>Drone Delivery</h1>
+    <p class="subtitle">Powered by Staex · Solana · DePIN</p>
+  </div>
+
+  <div class="card">
+
+    <!-- Wallet -->
+    <div>
+      <div class="section-label">Deine Wallet (Devnet)</div>
+      <div class="wallet-row">
+        <input class="wallet-addr" id="walletAddr" readonly value="Lade..." onclick="this.select()">
+        <button class="copy-btn" onclick="copyAddr()">Kopieren</button>
+      </div>
+      <button class="backup-toggle" onclick="toggleBackup()">💾 Wallet sichern / wiederherstellen</button>
+      <div class="backup-panel" id="backupPanel">
+        <div class="backup-label">Sicherungsschlüssel — kopiere ihn in deine Notizen:</div>
+        <div class="backup-key" id="backupKey"></div>
+        <button class="copy-btn" style="width:100%;margin-bottom:2px" onclick="copyBackupKey()">Schlüssel kopieren</button>
+        <div class="backup-label" style="margin-top:12px">Schlüssel wiederherstellen (nach URL-Wechsel):</div>
+        <div class="restore-row">
+          <input class="restore-input" id="restoreInput" type="text" placeholder="Sicherungsschlüssel einfügen...">
+          <button class="restore-btn" onclick="restoreWallet()">Laden</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Balance -->
+    <div>
+      <div class="section-label">Guthaben</div>
+      <div class="balance-row">
+        <span class="balance-amount" id="balanceDisplay">—</span>
+        <button class="airdrop-btn" id="airdropBtn" onclick="doAirdrop()" style="display:none">
+          + Airdrop 1 SOL
+        </button>
+      </div>
+    </div>
+
+    <hr class="divider">
+
+    <!-- Delivery info -->
+    <div>
+      <div class="section-label">Lieferung</div>
+      <div class="info-grid">
+        <div class="info-cell">
+          <div class="info-value" id="amountDisplay">—</div>
+          <div class="info-sub">Betrag (SOL)</div>
+        </div>
+        <div class="info-cell">
+          <div class="info-value" id="deadlineDisplay">—</div>
+          <div class="info-sub">Deadline (Min)</div>
+        </div>
+      </div>
+      <div style="margin-top: 10px; background: #0d0d1a; border-radius: 12px; padding: 12px;">
+        <div class="info-sub" style="margin-bottom: 4px;">Seller erhält bei Lieferung:</div>
+        <div style="font-family: monospace; font-size: 13px; color: #a0a0c8; word-break: break-all;" id="sellerDisplay">Lade...</div>
+      </div>
+    </div>
+
+    <hr class="divider">
+
+    <!-- GPS -->
+    <div>
+      <div class="section-label">Dein Standort (Lieferziel)</div>
+      <div class="gps-box" id="gpsBox">GPS wird ermittelt...</div>
+    </div>
+
+    <!-- Order button -->
+    <button class="order-btn" id="orderBtn" disabled onclick="placeOrder()">
+      Drohne bestellen
+    </button>
+    <button class="order-btn" id="cancelBtn" onclick="cancelOrder()" style="display:none;background:linear-gradient(135deg,#7f1d1d,#991b1b);margin-top:8px">
+      Order stornieren (SOL zurück)
+    </button>
+    <div class="spinner" id="spinner"></div>
+
+    <!-- Status panel -->
+    <div class="status-panel" id="statusPanel">
+      <div class="status-line" id="escrowLine" style="display:none">
+        <span class="status-icon">🔒</span>
+        <div class="status-text">
+          <div>SOL in Escrow gesperrt</div>
+          <a id="escrowLink" class="tx-link" href="#" target="_blank"></a>
+        </div>
+      </div>
+      <div class="status-line" id="droneDispatchLine" style="display:none">
+        <span class="status-icon">🚁</span>
+        <div class="status-text">Drohne ist unterwegs...</div>
+      </div>
+      <div class="status-line" id="deliveryLine" style="display:none">
+        <span class="status-icon">✅</span>
+        <div class="status-text">
+          <div>Lieferung bestätigt on-chain</div>
+          <a id="deliveryLink" class="tx-link" href="#" target="_blank"></a>
+        </div>
+      </div>
+    </div>
+
+    <!-- Delivered banner -->
+    <div class="delivered-banner" id="deliveredBanner">
+      <div class="delivered-emoji">🎉</div>
+      <div class="delivered-title">Geliefert!</div>
+      <div class="delivered-sub">Proof of Delivery on-chain bestätigt ✓<br>Seller hat das SOL erhalten.</div>
+    </div>
+
+  </div>
+
+  <!-- RPi4 Live Log -->
+  <div style="width:100%;max-width:400px;margin-top:16px;">
+    <div style="font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#555;margin-bottom:6px;">RPi4 Live Log</div>
+    <div id="rpiLog" style="background:#0a0f0a;border:1px solid #1a2a1a;border-radius:12px;padding:12px;font-family:monospace;font-size:12px;color:#4ade80;min-height:80px;max-height:220px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;">Warte auf RPi4...</div>
+  </div>
+
+  <p class="powered">DePIN Drone PoC · Solana Devnet · GPS-verifiziert on-chain</p>
+
+  <div class="toast" id="toast"></div>
+
+  <!-- @solana/web3.js v1 IIFE bundle — exposes window.solanaWeb3 -->
+  <script src="https://unpkg.com/@solana/web3.js@1/lib/index.iife.min.js"></script>
+
+  <script>
+    // ── State ────────────────────────────────────────────────────────────────
+    let wallet = null;
+    let connection = null;
+    let config = null;
+    let currentLat = null;
+    let currentLon = null;
+    let balanceLamports = 0;
+    let pollInterval = null;
+    let notificationsEnabled = false;
+
+    const EXPLORER = 'https://explorer.solana.com/tx/{}?cluster=devnet';
+
+    function explorerUrl(sig) {
+      return EXPLORER.replace('{}', sig);
+    }
+
+    // ── Init ─────────────────────────────────────────────────────────────────
+    async function init() {
+      try {
+        wallet = loadOrCreateWallet();
+        document.getElementById('walletAddr').value = wallet.publicKey.toString();
+
+        // Fetch backend config (seller pubkey, program id, amount, deadline)
+        const res = await fetch('/config');
+        config = await res.json();
+
+        connection = new solanaWeb3.Connection(config.rpc_url, 'confirmed');
+
+        document.getElementById('amountDisplay').textContent = config.delivery_amount_sol.toFixed(2);
+        document.getElementById('deadlineDisplay').textContent = config.deadline_minutes;
+        document.getElementById('sellerDisplay').textContent =
+          config.seller_pubkey.slice(0, 8) + '...' + config.seller_pubkey.slice(-8);
+
+        await updateBalance();
+        startGPS();
+        requestNotificationPermission();
+        await restoreStatus();
+      } catch (e) {
+        showToast('Init-Fehler: ' + e.message);
+        console.error(e);
+      }
+    }
+
+    async function restoreStatus() {
+      try {
+        const res = await fetch('/status');
+        const data = await res.json();
+        if (data.status === 'drone_dispatched' && data.escrow_tx) {
+          showEscrowStatus(data.escrow_tx);
+          startPolling();
+        } else if (data.status === 'delivered' && data.delivery_tx) {
+          showEscrowStatus(data.escrow_tx || '');
+          showDelivered(data.delivery_tx);
+          if (pollInterval) clearInterval(pollInterval);
+        }
+      } catch {}
+      await checkEscrowOnChain();
+    }
+
+    async function checkEscrowOnChain() {
+      try {
+        const programId   = new solanaWeb3.PublicKey(config.program_id);
+        const dronePubkey = new solanaWeb3.PublicKey(config.drone_operator_pubkey);
+        const [escrowPda] = solanaWeb3.PublicKey.findProgramAddressSync(
+          [new TextEncoder().encode('escrow'), dronePubkey.toBytes()], programId
+        );
+        const info = await connection.getAccountInfo(escrowPda);
+        document.getElementById('cancelBtn').style.display = info !== null ? 'block' : 'none';
+      } catch {}
+    }
+
+    // ── Wallet ───────────────────────────────────────────────────────────────
+    function loadOrCreateWallet() {
+      const stored = localStorage.getItem('droneWalletKey');
+      if (stored) {
+        return solanaWeb3.Keypair.fromSecretKey(Uint8Array.from(JSON.parse(stored)));
+      }
+      const kp = solanaWeb3.Keypair.generate();
+      localStorage.setItem('droneWalletKey', JSON.stringify(Array.from(kp.secretKey)));
+      return kp;
+    }
+
+    function copyAddr() {
+      const el = document.getElementById('walletAddr');
+      el.select();
+      try {
+        document.execCommand('copy');
+        showToast('Adresse kopiert!');
+      } catch {
+        showToast('Strg+C zum Kopieren');
+      }
+    }
+
+    function toggleBackup() {
+      const panel = document.getElementById('backupPanel');
+      const isOpen = panel.classList.toggle('open');
+      if (isOpen && wallet) {
+        // Base64-encode the 64-byte secret key
+        const b64 = btoa(String.fromCharCode(...wallet.secretKey));
+        document.getElementById('backupKey').textContent = b64;
+      }
+    }
+
+    function copyBackupKey() {
+      const key = document.getElementById('backupKey').textContent;
+      navigator.clipboard.writeText(key).then(() => showToast('Schlüssel kopiert!'));
+    }
+
+    function restoreWallet() {
+      const input = document.getElementById('restoreInput').value.trim();
+      if (!input) return;
+      try {
+        const bytes = Uint8Array.from(atob(input), c => c.charCodeAt(0));
+        if (bytes.length !== 64) throw new Error('Ungültige Länge');
+        localStorage.setItem('droneWalletKey', JSON.stringify(Array.from(bytes)));
+        showToast('Wallet geladen — Seite wird neu geladen...');
+        setTimeout(() => location.reload(), 1500);
+      } catch (e) {
+        showToast('Fehler: Ungültiger Schlüssel');
+      }
+    }
+
+    // ── Balance ──────────────────────────────────────────────────────────────
+    async function updateBalance() {
+      try {
+        balanceLamports = await connection.getBalance(wallet.publicKey);
+        const sol = balanceLamports / solanaWeb3.LAMPORTS_PER_SOL;
+        const el = document.getElementById('balanceDisplay');
+        el.textContent = sol.toFixed(4) + ' SOL';
+
+        const needed = config.delivery_amount_sol * solanaWeb3.LAMPORTS_PER_SOL + 10_000_000; // +0.01 SOL buffer
+        if (balanceLamports < needed) {
+          el.classList.add('low');
+          document.getElementById('airdropBtn').style.display = 'block';
+        } else {
+          el.classList.remove('low');
+          document.getElementById('airdropBtn').style.display = 'none';
+        }
+        checkOrderReady();
+      } catch (e) {
+        document.getElementById('balanceDisplay').textContent = '?';
+      }
+    }
+
+    async function doAirdrop() {
+      const btn = document.getElementById('airdropBtn');
+      btn.disabled = true;
+      btn.textContent = 'Airdrop läuft...';
+      try {
+        const sig = await connection.requestAirdrop(wallet.publicKey, solanaWeb3.LAMPORTS_PER_SOL);
+        await connection.confirmTransaction(sig, 'confirmed');
+        await updateBalance();
+        showToast('1 SOL erhalten!');
+      } catch (e) {
+        showToast('Airdrop fehlgeschlagen: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '+ Airdrop 1 SOL';
+      }
+    }
+
+    // ── GPS ──────────────────────────────────────────────────────────────────
+    function startGPS() {
+      if (!navigator.geolocation) {
+        setGPS('GPS nicht verfügbar', 'error');
+        return;
+      }
+      navigator.geolocation.watchPosition(
+        (pos) => {
+          currentLat = pos.coords.latitude;
+          currentLon = pos.coords.longitude;
+          const acc = pos.coords.accuracy.toFixed(0);
+          const box = document.getElementById('gpsBox');
+          box.innerHTML = `📍 ${currentLat.toFixed(5)}, ${currentLon.toFixed(5)}<br><small style="color:#666">±${acc}m Genauigkeit</small>`;
+          box.className = 'gps-box ready';
+          checkOrderReady();
+        },
+        (err) => setGPS('GPS-Fehler: ' + err.message, 'error'),
+        { enableHighAccuracy: true, maximumAge: 5000 }
+      );
+    }
+
+    function setGPS(msg, cls) {
+      const box = document.getElementById('gpsBox');
+      box.textContent = msg;
+      box.className = 'gps-box' + (cls ? ' ' + cls : '');
+    }
+
+    // ── Order readiness ──────────────────────────────────────────────────────
+    function checkOrderReady() {
+      const needed = config ? config.delivery_amount_sol * solanaWeb3.LAMPORTS_PER_SOL + 10_000_000 : Infinity;
+      const ready = currentLat !== null && balanceLamports >= needed;
+      document.getElementById('orderBtn').disabled = !ready;
+    }
+
+    // ── Discriminator (Anchor) ───────────────────────────────────────────────
+    async function anchorDisc(name) {
+      const encoded = new TextEncoder().encode('global:' + name);
+      const hash = await crypto.subtle.digest('SHA-256', encoded);
+      return new Uint8Array(hash).slice(0, 8);
+    }
+
+    // ── LE encoding ──────────────────────────────────────────────────────────
+    function u64LE(value) {
+      const buf = new ArrayBuffer(8);
+      new DataView(buf).setBigUint64(0, BigInt(Math.floor(value)), true);
+      return new Uint8Array(buf);
+    }
+
+    function i64LE(value) {
+      const buf = new ArrayBuffer(8);
+      new DataView(buf).setBigInt64(0, BigInt(Math.floor(value)), true);
+      return new Uint8Array(buf);
+    }
+
+    function concat(...arrays) {
+      const total = arrays.reduce((s, a) => s + a.length, 0);
+      const out = new Uint8Array(total);
+      let off = 0;
+      for (const a of arrays) { out.set(a, off); off += a.length; }
+      return out;
+    }
+
+    // ── Place order ──────────────────────────────────────────────────────────
+    async function placeOrder() {
+      if (!currentLat || !currentLon || !config) return;
+
+      const btn = document.getElementById('orderBtn');
+      btn.disabled = true;
+      document.getElementById('spinner').style.display = 'block';
+
+      try {
+        // 1. Build create_delivery instruction
+        const programId     = new solanaWeb3.PublicKey(config.program_id);
+        const sellerPubkey  = new solanaWeb3.PublicKey(config.seller_pubkey);
+        const dronePubkey   = new solanaWeb3.PublicKey(config.drone_operator_pubkey);
+        const amountLamports = Math.floor(config.delivery_amount_sol * solanaWeb3.LAMPORTS_PER_SOL);
+        const deadline = Math.floor(Date.now() / 1000) + config.deadline_minutes * 60;
+
+        const [escrowPda] = solanaWeb3.PublicKey.findProgramAddressSync(
+          [new TextEncoder().encode('escrow'), dronePubkey.toBytes()],
+          programId
+        );
+
+        const disc = await anchorDisc('create_delivery');
+        const data = concat(
+          disc,
+          u64LE(amountLamports),
+          i64LE(Math.round(currentLat * 1e7)),
+          i64LE(Math.round(currentLon * 1e7)),
+          i64LE(deadline)
+        );
+
+        const ix = new solanaWeb3.TransactionInstruction({
+          programId,
+          keys: [
+            { pubkey: escrowPda,                              isSigner: false, isWritable: true  },
+            { pubkey: wallet.publicKey,                       isSigner: true,  isWritable: true  },
+            { pubkey: sellerPubkey,                           isSigner: false, isWritable: false },
+            { pubkey: dronePubkey,                            isSigner: false, isWritable: false },
+            { pubkey: solanaWeb3.SystemProgram.programId,     isSigner: false, isWritable: false },
+          ],
+          data,
+        });
+
+        // 2. Send TX
+        const tx = new solanaWeb3.Transaction();
+        tx.add(ix);
+        tx.feePayer = wallet.publicKey;
+        const latestBlockhash = await connection.getLatestBlockhash();
+        tx.recentBlockhash = latestBlockhash.blockhash;
+        tx.sign(wallet);
+
+        const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+
+        // 3. Confirm TX
+        await connection.confirmTransaction(
+          { signature: sig, blockhash: latestBlockhash.blockhash, lastValidBlockHeight: latestBlockhash.lastValidBlockHeight },
+          'confirmed'
+        );
+
+        // 4. Update balance
+        await updateBalance();
+
+        // 5. Show escrow confirmed
+        showEscrowStatus(sig);
+
+        // 6. Notify backend → start drone
+        await fetch('/order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            lat: currentLat,
+            lon: currentLon,
+            buyer_pubkey: wallet.publicKey.toString(),
+            escrow_tx: sig,
+          }),
+        });
+
+        document.getElementById('spinner').style.display = 'none';
+        startPolling();
+
+      } catch (e) {
+        document.getElementById('spinner').style.display = 'none';
+        btn.disabled = false;
+        showToast('Fehler: ' + (e.message || String(e)));
+        console.error(e);
+      }
+    }
+
+    // ── Status display ───────────────────────────────────────────────────────
+    function showEscrowStatus(sig) {
+      document.getElementById('statusPanel').classList.add('show');
+
+      const escrowLine = document.getElementById('escrowLine');
+      escrowLine.style.display = 'flex';
+      const link = document.getElementById('escrowLink');
+      link.href = explorerUrl(sig);
+      link.textContent = sig.slice(0, 20) + '...' + sig.slice(-8);
+
+      document.getElementById('droneDispatchLine').style.display = 'flex';
+      const isOutdoor = new URLSearchParams(window.location.search).get('outdoor') === '1';
+      if (!isOutdoor) document.getElementById('simulateBtn').style.display = 'block';
+    }
+
+    function showDelivered(deliverySig) {
+      document.getElementById('droneDispatchLine').style.display = 'none';
+
+      const deliveryLine = document.getElementById('deliveryLine');
+      deliveryLine.style.display = 'flex';
+      const link = document.getElementById('deliveryLink');
+      link.href = explorerUrl(deliverySig);
+      link.textContent = deliverySig.slice(0, 20) + '...' + deliverySig.slice(-8);
+
+      document.getElementById('simulateBtn').style.display = 'none';
+      document.getElementById('deliveredBanner').classList.add('show');
+
+      showToast('🎉 Lieferung bestätigt!');
+      if (notificationsEnabled) {
+        new Notification('🎉 Drohne angekommen!', {
+          body: 'Proof of Delivery on-chain bestätigt ✓',
+          icon: '🚁',
+        });
+      }
+    }
+
+    // ── Poll status ──────────────────────────────────────────────────────────
+    function startPolling() {
+      if (pollInterval) clearInterval(pollInterval);
+      pollInterval = setInterval(async () => {
+        try {
+          const res = await fetch('/status');
+          const data = await res.json();
+          if (data.status === 'delivered' && data.delivery_tx) {
+            clearInterval(pollInterval);
+            showDelivered(data.delivery_tx);
+          }
+        } catch {}
+      }, 3000);
+    }
+
+    // ── Notifications ────────────────────────────────────────────────────────
+    function requestNotificationPermission() {
+      if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission().then(p => {
+          notificationsEnabled = p === 'granted';
+        });
+      } else if (Notification.permission === 'granted') {
+        notificationsEnabled = true;
+      }
+    }
+
+    // ── Toast ────────────────────────────────────────────────────────────────
+    function showToast(msg) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.classList.add('show');
+      setTimeout(() => el.classList.remove('show'), 3000);
+    }
+
+    // ── Cancel order ─────────────────────────────────────────────────────────
+    async function cancelOrder() {
+      if (!config || !wallet) return;
+      const btn = document.getElementById('cancelBtn');
+      btn.disabled = true;
+      btn.textContent = 'Storniere...';
+      try {
+        const programId    = new solanaWeb3.PublicKey(config.program_id);
+        const dronePubkey  = new solanaWeb3.PublicKey(config.drone_operator_pubkey);
+        const [escrowPda]  = solanaWeb3.PublicKey.findProgramAddressSync(
+          [new TextEncoder().encode('escrow'), dronePubkey.toBytes()], programId
+        );
+        const disc = await anchorDisc('cancel_delivery');
+        const ix = new solanaWeb3.TransactionInstruction({
+          programId,
+          keys: [
+            { pubkey: escrowPda,          isSigner: false, isWritable: true },
+            { pubkey: wallet.publicKey,   isSigner: true,  isWritable: true },
+          ],
+          data: disc,
+        });
+        const tx = new solanaWeb3.Transaction();
+        tx.add(ix);
+        tx.feePayer = wallet.publicKey;
+        const lb = await connection.getLatestBlockhash();
+        tx.recentBlockhash = lb.blockhash;
+        tx.sign(wallet);
+        const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+        await connection.confirmTransaction({ signature: sig, blockhash: lb.blockhash, lastValidBlockHeight: lb.lastValidBlockHeight }, 'confirmed');
+        showToast('Storniert! SOL zurück in deiner Wallet.');
+        btn.style.display = 'none';
+        await fetch('/order', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lat: 0, lon: 0, cancelled: true }) });
+      } catch (e) {
+        showToast('Fehler: ' + (e.message || String(e)));
+        btn.disabled = false;
+        btn.textContent = 'Order stornieren (SOL zurück)';
+      }
+    }
+
+    // ── Simulate arrival (Demo) ──────────────────────────────────────────────
+    async function simulateArrival() {
+      const btn = document.getElementById('simulateBtn');
+      btn.disabled = true;
+      btn.textContent = 'Sende TX...';
+      try {
+        await fetch('/simulate_arrival', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lat: currentLat, lon: currentLon }),
+        });
+        showToast('Drohne als angekommen markiert — TX kommt...');
+      } catch(e) {
+        showToast('Fehler: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = 'Drohne ist da ✓ (Demo)';
+      }
+    }
+
+    // ── RPi4 Live Log ────────────────────────────────────────────────────────
+    let _lastLogCount = 0;
+    async function pollRpiLogs() {
+      try {
+        const r = await fetch('/rpi_logs');
+        const data = await r.json();
+        const logs = data.logs || [];
+        if (logs.length !== _lastLogCount) {
+          _lastLogCount = logs.length;
+          const box = document.getElementById('rpiLog');
+          box.textContent = logs.length ? logs.join('\n') : 'Warte auf RPi4...';
+          box.scrollTop = box.scrollHeight;
+        }
+      } catch(e) {}
+    }
+    setInterval(pollRpiLogs, 2000);
+
+    // ── Start ────────────────────────────────────────────────────────────────
+    window.addEventListener('load', init);
+  </script>
+</body>
+</html>

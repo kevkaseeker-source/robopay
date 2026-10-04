@@ -1,0 +1,15 @@
+[Unit]
+Description=RoboPay power/throttle monitor (logs undervoltage to the journal)
+After=systemd-journald.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/robopay-power-monitor
+Restart=always
+RestartSec=5
+# Must be root: vcgencmd needs /dev/vcio, which is root-only on this image.
+User=root
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
