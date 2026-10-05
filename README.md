@@ -17,7 +17,7 @@ No person approves the payment.
 
 | | |
 |---|---|
-| Demo video | *(link added after upload)* |
+| Demo video | https://www.youtube.com/watch?v=s1ABNAcr0pE |
 | Live app | https://robopay.staexhosting.com: `/buyer/` places orders, `/seller/` is the owner dashboard (login in the submission form; the car must be switched on to drive) |
 | Escrow program (devnet) | [`3NmsWVX39uvzG3PBNPdSe4FTgudqSeLphJSbMDhV5F8Y`](https://explorer.solana.com/address/3NmsWVX39uvzG3PBNPdSe4FTgudqSeLphJSbMDhV5F8Y?cluster=devnet) |
 | Buyer funds escrow (`CreateDelivery`) | [`3hHb4nQu…KtBPUDF`](https://explorer.solana.com/tx/3hHb4nQuJsazUaND7LzSBb4M42qKqvSL3aPf6VjmPAwahk8F1PHWvbTyFTwcqxCZbL42B9TXEAQyFww5fKtBPUDF?cluster=devnet) |
@@ -256,8 +256,8 @@ connectivity let machines take part in economic transactions without human
 intervention: GPS-triggered vs. AI-agent (x402) payments, hardware prototypes,
 risks of machine autonomy, and the societal impact.
 
-- Whitepaper 1 (Aug 2025): https://drive.google.com/file/d/1jAlIEzMXRwHfi5iX24QuDZeIgeXCyYw0/view
-- Whitepaper 2 (Oct 2025): https://drive.google.com/file/d/1EAghRdOFmiYza4A5TDOuNY5xfbVkrSe-/view
+- Whitepaper 1 (Aug 2025): https://x.com/KEBNH123/status/1952819057830281697/photo/1
+- Whitepaper 2 (Oct 2025): https://x.com/KEBNH123/status/1982162320735297785/photo/1
 - Indoor PoC demo (drone): https://www.youtube.com/watch?v=bNMbiIRFMoI
 
 ## Copyright
