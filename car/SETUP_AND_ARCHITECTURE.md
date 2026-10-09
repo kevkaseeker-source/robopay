@@ -693,11 +693,11 @@ QR (confirmed via `/seller/proxy/camera/qr` directly), but nothing
 happens — `car-trigger`'s own log was the only place this was visible
 (`Could not reach PC server: ... 192.168.178.61 ... Connection timed
 out`). Fixed by pointing it at the real public buyer app instead:
-`Environment=PC_SERVER_URL=https://RoboPay:<BUYER_PASSWORD>@robopay.staexhosting.com/buyer`
-— the Basic Auth userinfo in the URL isn't actually required (the
+`Environment=PC_SERVER_URL=https://robopay.staexhosting.com/buyer`
+— no Basic Auth credentials needed in the URL (the
 `/active_order`, `/delivered`, `/force_delivery`, `/rpi_log` paths
 `car_main.py` calls are all in `buyer_app.py`'s `exempt_paths`, see
-§11), but doesn't hurt as a safety net if that ever changes. Also
+§11). Also
 matters that this URL goes through the gateway (§13) with the `/buyer`
 prefix — the gateway strips it before forwarding, so `buyer_app.py`
 still sees the plain `/active_order` etc. paths it expects.
