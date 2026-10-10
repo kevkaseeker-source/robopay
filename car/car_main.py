@@ -62,7 +62,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "rpi"))
 import config as cfg  # noqa: E402  (path insert must happen first)
 from solana_client import SolanaClient  # noqa: E402
-import peaq_ownership  # noqa: E402
+import payout_policy  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Config
@@ -190,21 +190,33 @@ def main():
     solana = None if args.dry_run else SolanaClient(
         cfg.SOLANA_RPC_URL, cfg.WALLET_KEYPAIR_PATH, cfg.DRONE_PROGRAM_ID
     )
+    check_payout_config()
     if solana:
-        log.info("PiCarOwner (seller) wallet configured: %s", cfg.SELLER_PUBKEY)
+        log.info("Payout mode: %s (machine %s)", cfg.PAYOUT_MODE, cfg.MACHINE_ID)
     if not cfg.MACHINE_TOKEN:
         log.warning("MACHINE_TOKEN is not set - the buyer app will reject this car's "
                     "polls with HTTP 401 and no order will ever arrive.")
 
+    escrow = None  # demo mode: _confirm() runs the preflight itself before paying
     if args.demo:
         order = DEMO_ORDER
         log.info("Demo mode: using fixed local order (no PC server)")
     else:
         log.info("Waiting for order from PC server (%s) ...", PC_SERVER_URL)
         send_log("Warte auf Order vom Server...")
-        order = None
+        order, escrow, rejected = None, None, set()
         while order is None:
             order = fetch_order()
+            if order is not None and order.get("escrow_tx") in rejected:
+                order = None  # already refused this one; wait for the buyer to refund / reorder
+            elif order is not None and solana is not None:
+                try:
+                    escrow = preflight(solana)
+                except payout_policy.PayoutRefused as e:
+                    log.error("Refusing order %s: %s", order.get("escrow_tx"), e)
+                    send_log(f"Order abgelehnt: {e}")
+                    rejected.add(order.get("escrow_tx"))
+                    order = None
             if order is None:
                 log.info("No active order yet, retrying in %.0fs ...", ORDER_POLL_INTERVAL_S)
                 time.sleep(ORDER_POLL_INTERVAL_S)
@@ -224,7 +236,7 @@ def main():
             if check_force_delivery():
                 log.info("Force delivery triggered from server!")
                 send_log("Demo-Button gedrueckt - sende TX...")
-                _confirm(solana, args.dry_run, lat, lon, order_id)
+                _confirm(solana, args.dry_run, lat, lon, order_id, escrow)
                 break
 
             qr = get_qr()
@@ -238,7 +250,7 @@ def main():
                 log.info("ARRIVED at delivery box! (qr matched, distance=%s)", dist)
                 dist_str = f"{dist:.1f}cm" if dist is not None else "n/a"
                 send_log(f"ANGEKOMMEN! QR erkannt, Abstand {dist_str} - sende Proof of Delivery TX...")
-                _confirm(solana, args.dry_run, lat, lon, order_id)
+                _confirm(solana, args.dry_run, lat, lon, order_id, escrow)
                 break
 
             time.sleep(POLL_INTERVAL_S)
@@ -247,22 +259,56 @@ def main():
         log.info("Stopped.")
 
 
-def _confirm(solana, dry_run, lat, lon, order_id):
+def check_payout_config():
+    """Refuse to start with a payout setup that could pay the wrong wallet:
+    DID mode needs MACHINE_ID, and the fixed-wallet mode must be chosen
+    explicitly (PAYOUT_MODE=static) - no silent fallback."""
+    if cfg.PAYOUT_MODE not in ("did", "static"):
+        log.error("PAYOUT_MODE=%r is invalid (use 'did' or 'static') - not starting", cfg.PAYOUT_MODE)
+        raise SystemExit(2)
+    if cfg.PAYOUT_MODE == "did" and cfg.MACHINE_ID is None:
+        log.error("PAYOUT_MODE=did but MACHINE_ID is not set - not starting "
+                  "(set MACHINE_ID, or PAYOUT_MODE=static to pay SELLER_PUBKEY)")
+        raise SystemExit(2)
+    if cfg.PAYOUT_MODE == "static":
+        log.warning("PAYOUT_MODE=static: paying the fixed SELLER_PUBKEY %s, not the Machine-NFT owner",
+                    cfg.SELLER_PUBKEY)
+
+
+def resolve_owner():
+    """Solana wallet of the car's current owner (raises PayoutRefused)."""
+    return payout_policy.resolve_payout_owner(cfg.PAYOUT_MODE, cfg.MACHINE_ID, cfg.PEAQ_RPC_URL,
+                                              cfg.SELLER_PUBKEY)
+
+
+def preflight(solana):
+    """Before driving: the order's escrow must be live and pay the car's
+    current owner. Returns the escrow; raises PayoutRefused otherwise."""
+    escrow = solana.read_escrow()
+    payout_policy.check_order(escrow, resolve_owner(), time.time())
+    return escrow
+
+
+def _confirm(solana, dry_run, lat, lon, order_id, escrow=None):
     if dry_run:
         log.info("[dry-run] Would send confirm_delivery TX here.")
         report_delivered(lat, lon, "dry-run-tx")
         return
 
-    seller = None
-    if cfg.MACHINE_ID is not None:
-        try:
-            client = peaq_ownership.build_client(cfg.PEAQ_RPC_URL)
-            seller = peaq_ownership.current_owner(client, cfg.MACHINE_ID)
-            log.info("Paying current Machine-NFT owner: %s", seller)
-        except peaq_ownership.OwnerLookupError as e:
-            log.error("Could not resolve the current owner, refusing to confirm: %s", e)
-            send_log(f"TX abgelehnt: Besitzer konnte nicht ermittelt werden: {e}")
-            return
+    # Kevin's rule: ownership must not change during a delivery. Pay the
+    # escrow's own seller (the only wallet the program accepts) - but only
+    # if that is still the car's owner right now. If the NFT moved, nobody
+    # is paid and the escrow stays PENDING so the buyer can reclaim it.
+    try:
+        if escrow is None:
+            escrow = preflight(solana)
+        seller = payout_policy.check_payout(escrow, resolve_owner())
+        log.info("Paying the car's owner (escrow seller, confirmed via %s): %s", cfg.PAYOUT_MODE, seller)
+    except payout_policy.PayoutRefused as e:
+        log.error("Not paying: %s", e)
+        send_log(f"Keine Auszahlung: {e}. Besitzer muss waehrend der Lieferung gleich bleiben - "
+                 f"der Kaeufer kann nach Fristablauf zurueckbuchen.")
+        return
 
     try:
         sig = solana.confirm_delivery(lat, lon, seller=seller)

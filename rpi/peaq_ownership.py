@@ -125,8 +125,16 @@ def build_client(peaq_rpc_url: str):
 
 
 def current_owner(client, machine_id: int) -> Pubkey:
-    """Return the Solana wallet that should be paid for machine_id's next
-    delivery, or raise OwnerLookupError.
+    """Solana wallet to pay for machine_id's next delivery (see
+    current_owner_details for the full contract)."""
+    return current_owner_details(client, machine_id)[0]
+
+
+def current_owner_details(client, machine_id: int):
+    """Return (solana_pubkey, owner_evm_address) for machine_id: the Solana
+    wallet that should be paid for its next delivery, plus the Machine-NFT
+    owner's peaq address (so UIs can show both identities from one RPC
+    read). Raises OwnerLookupError.
 
     Args:
         client: A client from build_client(), or an equivalent test double
@@ -206,4 +214,4 @@ def current_owner(client, machine_id: int) -> Pubkey:
                 "refusing rather than guessing which one to pay"
                 % (machine_id, owner_raw)
             )
-    return matches[0]
+    return matches[0], str(owner_raw)

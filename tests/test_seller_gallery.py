@@ -138,7 +138,11 @@ check('href="../"' in body, "relative: back link is not the expected relative '.
 # regex rather than an exact source string so this survives the value being
 # escaped/renamed (e.g. escapeHtml(tx.escrow_tx) as safeEscrowTx) as long as
 # the href itself stays relative.
-index_body = seller_app.INDEX_HTML
+# The transaction table moved into the shared static/robopay_activity.js
+# (used by the buyer and seller pages), so look there as well.
+_activity_js = os.path.join(os.path.dirname(os.path.abspath(seller_app.__file__)), "static", "robopay_activity.js")
+with open(_activity_js, encoding="utf-8") as _f:
+    index_body = seller_app.INDEX_HTML + _f.read()
 gallery_href = re.search(r'href="(/?gallery/\$\{[^}]*\})"', index_body)
 check(gallery_href is not None,
       "relative: pollTx() gallery link template not found as a relative reference")

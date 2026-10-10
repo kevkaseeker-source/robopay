@@ -14,6 +14,7 @@ from solders.transaction import Transaction
 from solana.rpc.api import Client
 
 import config as cfg
+import payout_policy
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +60,10 @@ class SolanaClient:
             [b"escrow", bytes(self._keypair.pubkey())], self._program_id
         )
         return pda
+
+    def read_escrow(self):
+        """This car's escrow account, decoded (see payout_policy), or None."""
+        return payout_policy.read_escrow(self._rpc, self.derive_escrow_pda())
 
     def derive_escrow_pda_for(self, operator: Pubkey) -> Pubkey:
         """Same derivation as derive_escrow_pda(), but for an operator that is

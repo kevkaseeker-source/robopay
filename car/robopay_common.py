@@ -12,6 +12,7 @@ import json
 import os
 import secrets
 import struct
+import sys
 import time
 from pathlib import Path
 
@@ -19,6 +20,9 @@ import requests
 from flask import Response, request
 from solana.rpc.api import Client
 from solders.pubkey import Pubkey
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "rpi"))
+import payout_policy  # noqa: E402  (path insert must happen first)
 
 # ---------------------------------------------------------------------------
 # Config (shared)
@@ -44,8 +48,15 @@ PEAQ_MACHINE_ID = os.getenv(
     "5149596011477982620423871887556457753159696362422273317835964893685329625592",
 )
 
+# Who receives the escrow (rpi/payout_policy.py): "did" = the Machine-NFT
+# owner's Solana wallet from the peaq DID, looked up for every order and
+# failing closed; "static" = SELLER_PUBKEY above, only when set explicitly.
+PAYOUT_MODE = os.getenv("PAYOUT_MODE", "did")
+
 DELIVERY_AMOUNT_SOL = float(os.getenv("DELIVERY_AMOUNT_SOL", "0.20"))
-DEADLINE_MINUTES = int(os.getenv("DEADLINE_MINUTES", "60"))
+# After this the car can no longer release the escrow (DeliveryExpired) and
+# buyer_app refunds it automatically (auto_refund).
+DEADLINE_MINUTES = int(os.getenv("DEADLINE_MINUTES", "25"))
 TARGET_LAT = float(os.getenv("TARGET_LAT", "52.3609"))
 TARGET_LON = float(os.getenv("TARGET_LON", "14.0600"))
 
@@ -62,6 +73,9 @@ PICAR_VIDEO_URL = os.getenv("PICAR_VIDEO_URL", PICAR_SERVER_URL)
 DEVNET_EXPLORER = "https://explorer.solana.com/tx/{}?cluster=devnet"
 
 STATE_FILE = Path(__file__).parent / "order_state.json"
+# Pause switch for ownership handoffs: while set, buyer_app accepts no orders
+# (see scripts/handoff and the CarOwnerApp's "take over income" flow).
+MACHINE_STATE_FILE = Path(__file__).parent / "machine_state.json"
 
 TX_LABELS = {
     "create_delivery": "Buyer TX (Escrow-Einzahlung)",
@@ -207,3 +221,115 @@ def make_auth(app, username_env, password_env, exempt_paths=()):
                 {"WWW-Authenticate": 'Basic realm="RoboPay"'},
             )
         return None
+
+
+# ---------------------------------------------------------------------------
+# Machine owner (peaq DID) and pause switch
+# ---------------------------------------------------------------------------
+def _resolve_owner_details():
+    """(solana_pubkey, owner_evm or None) - raises payout_policy.PayoutRefused."""
+    machine_id = int(PEAQ_MACHINE_ID) if PEAQ_MACHINE_ID else None
+    return payout_policy.resolve_owner_details(PAYOUT_MODE, machine_id, PEAQ_RPC_URL, SELLER_PUBKEY)
+
+
+def resolve_payout_owner() -> Pubkey:
+    """The wallet a new escrow must pay - looked up fresh, never cached, so
+    an order always pays whoever owns the car when it is placed."""
+    return _resolve_owner_details()[0]
+
+
+_owner_cache = {"t": 0.0, "value": None}
+
+
+def owner_info(max_age: float = 30.0) -> dict:
+    """Owner for display (dashboard, app). Cached briefly - display only,
+    never used to fund an escrow."""
+    if _owner_cache["value"] is not None and time.time() - _owner_cache["t"] < max_age:
+        return _owner_cache["value"]
+    try:
+        solana, evm = _resolve_owner_details()
+        value = {"mode": PAYOUT_MODE, "solana": str(solana), "evm": evm, "error": None}
+    except payout_policy.PayoutRefused as e:
+        value = {"mode": PAYOUT_MODE, "solana": None, "evm": None, "error": str(e)}
+    _owner_cache.update(t=time.time(), value=value)
+    return value
+
+
+def _machine_state() -> dict:
+    try:
+        return json.loads(MACHINE_STATE_FILE.read_text())
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def _write_machine_state(state: dict) -> None:
+    MACHINE_STATE_FILE.write_text(json.dumps(state))
+
+
+def is_paused() -> bool:
+    return bool(_machine_state().get("paused"))
+
+
+def set_paused(paused: bool, reason: str = "") -> None:
+    state = _machine_state()
+    state.update(paused=bool(paused), reason=reason, since=time.time())
+    _write_machine_state(state)
+
+
+# Automatic handoff lock. The server remembers the owner it last saw
+# confirmed (NFT owner + DID payout wallet). If either changes, orders stop
+# until the payout wallet's holder signs in once via the CarOwnerApp
+# (/mobile/verify). Why: between handoff steps 2 and 3 the DID can still
+# hold an entry the OLD owner planted, pointing at the old owner's wallet;
+# the new owner can never produce that wallet's signature, so a planted key
+# can't unlock orders. The first owner ever seen is accepted automatically.
+def handoff_pending(details) -> bool:
+    """details = (solana_pubkey, owner_evm). True while orders must wait."""
+    state = _machine_state()
+    current = [str(details[0]), details[1]]
+    if state.get("ack_owner") is None:
+        state["ack_owner"] = current
+        _write_machine_state(state)
+        return False
+    return state["ack_owner"] != current
+
+
+def acknowledge_owner(signed_pubkey: str) -> bool:
+    """Called after a verified wallet signature: unlocks orders if that wallet
+    is the payout wallet the DID names right now."""
+    try:
+        solana, evm = _resolve_owner_details()
+    except payout_policy.PayoutRefused:
+        return False
+    if str(solana) != signed_pubkey:
+        return False
+    state = _machine_state()
+    state["ack_owner"] = [str(solana), evm]
+    _write_machine_state(state)
+    _owner_cache.update(t=0.0, value=None)
+    return True
+
+
+MACHINE_REGISTRY = "0x64b93Cc29b251fAFa83BD110cDB1C24207f85536"
+_nft_owner_cache = {"t": 0.0, "owner": None}
+
+
+def nft_owner(max_age=15):
+    """The Machine-NFT's current holder straight from peaq's MachineRegistry
+    (ownerOf), independent of the DID - for display only. The payout always
+    goes through owner_info()/the DID, which refuses while a handoff is
+    half-done. Returns a 0x address or None if peaq can't be reached."""
+    now = time.time()
+    if now - _nft_owner_cache["t"] < max_age:
+        return _nft_owner_cache["owner"]
+    data = "0x6352211e" + format(int(PEAQ_MACHINE_ID), "064x")  # ownerOf(uint256)
+    try:
+        r = requests.post(PEAQ_RPC_URL, timeout=15, json={
+            "jsonrpc": "2.0", "id": 1, "method": "eth_call",
+            "params": [{"to": MACHINE_REGISTRY, "data": data}, "latest"]})
+        res = r.json().get("result") or ""
+        owner = "0x" + res[-40:] if len(res) >= 42 else None
+    except Exception:
+        owner = None
+    _nft_owner_cache.update(t=now, owner=owner)
+    return owner

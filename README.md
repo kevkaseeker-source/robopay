@@ -1,11 +1,12 @@
 # RoboPay
 
-**A robot car that confirms its own deliveries and gets paid on Solana.**
+**A robot car that confirms its own deliveries and gets paid on Solana. The income follows the car's owner.**
 
 A buyer locks SOL in an on-chain escrow. The PiCar-X robot car drives to the
 delivery box, recognises it by its QR code, looks up its current owner in its
 peaq machine identity, and signs the escrow release itself. The owner is paid.
-No person approves the payment.
+No person approves the payment. When the car's Machine-NFT moves to a new owner,
+the next delivery pays the new owner, with no change on the car or the server.
 
 - **Solana** moves the money: an Anchor escrow program on devnet.
 - **peaq** says who the car is and who owns it: a Machine-NFT whose DID names
@@ -17,17 +18,25 @@ No person approves the payment.
 
 | | |
 |---|---|
-| Demo video | https://www.youtube.com/watch?v=s1ABNAcr0pE |
-| Live app | https://robopay.staexhosting.com: `/buyer/` places orders, `/seller/` is the owner dashboard (login in the submission form; the car must be switched on to drive) |
+| PoC 1 video (first delivery, owner A is paid) | https://www.youtube.com/watch?v=P73MK2Du2Nw |
+| PoC 2 video (NFT handoff, owner B is paid) | https://www.youtube.com/watch?v=ZuGwDgmI6f0 |
+| Live app | https://robopay.staexhosting.com: the landing page links **Buyer** (`/buyer/`, places orders), **CarOwner A** and **CarOwner B** (`/seller/?owner=A`, `/seller/?owner=B`, owner dashboards with a browser wallet). Login in the submission form; the car must be switched on to drive |
 | Escrow program (devnet) | [`3NmsWVX39uvzG3PBNPdSe4FTgudqSeLphJSbMDhV5F8Y`](https://explorer.solana.com/address/3NmsWVX39uvzG3PBNPdSe4FTgudqSeLphJSbMDhV5F8Y?cluster=devnet) |
 | Buyer funds escrow (`CreateDelivery`) | [`3hHb4nQu…KtBPUDF`](https://explorer.solana.com/tx/3hHb4nQuJsazUaND7LzSBb4M42qKqvSL3aPf6VjmPAwahk8F1PHWvbTyFTwcqxCZbL42B9TXEAQyFww5fKtBPUDF?cluster=devnet) |
 | Car releases payment to owner (`ConfirmDelivery`) | [`3246mXTo…JNQsbCY`](https://explorer.solana.com/tx/3246mXToKGBB9GAwdfZsYPGWRZggLetqXgyGZLecTwKUUPm3DNqVK7xRGGYWS5dp6aj1qpjMjHqxg4dobJNQsbCY?cluster=devnet) |
 | Car's peaq Machine-NFT | machine ID `5149596011477982620423871887556457753159696362422273317835964893685329625592` (peaq mainnet) |
+| PoC 2: NFT transfer owner A → owner B (peaq) | [`0xdaa42740…10349bbff`](https://peaq.subscan.io/tx/0xdaa427400f0f9ec0f423124a2d1d9bd26e3867c2f04ff9584bb2efd10349bbff) |
+| PoC 2: buyer funds escrow, payee already owner B | [`2qt4d15Z…dUr5oGc3m`](https://explorer.solana.com/tx/2qt4d15ZapokLZ1GpNNR33aHhRyXSEyvXZsEwV2iJ4Dbht8Ct7j1FR72wafziPZC8Z1RBpz5oPGkWTvdUr5oGc3m?cluster=devnet) |
+| PoC 2: car releases payment to owner B | [`6mg2jA23…jbyvhhnVePhs`](https://explorer.solana.com/tx/6mg2jA23GdQ32aDjN1X8hoYJCabJDFS8xD4pgkJREnBtV1R4pm3ELDxtFfwUjVQFcbam7U1xoj3jbyvhhnVePhs?cluster=devnet) |
 
-In the payout transaction the escrow pays 0.2 SOL to the owner wallet
-`BRUeF8xjzM62Q18eSzt2HGiyLErsFnFRi5YaYpsStmpB`. The car's own operator wallet
-`7VizNvqBSnHnP8ySnsjxxyUnBQCybVnJHBDRyvaThXia` signs the release and pays only
-the network fee.
+PoC 1 (3 Oct 2026): the escrow pays 0.2 SOL to owner A's wallet
+`BRUeF8xjzM62Q18eSzt2HGiyLErsFnFRi5YaYpsStmpB`.
+PoC 2 (10 Oct 2026): owner A (`0x4d99BeAD5A4CCE20a7F93CB2CF62f1847263Ea8f`) sends the
+Machine-NFT to owner B (`0x91BF2b4694835652a1792fef35Ca505eb902A2Cc`), owner B takes
+over the DID, and the next delivery pays owner B's wallet
+`7hUjeMv72iTArXg73QKwkzMJ61hYLTjGL7X9Ki4BCrk4` (1.05 → 1.25 SOL), not owner A.
+In both, the car's own operator wallet `7VizNvqBSnHnP8ySnsjxxyUnBQCybVnJHBDRyvaThXia`
+signs the release and pays only the network fee.
 
 ## The problem
 
@@ -62,16 +71,18 @@ flowchart LR
     EVM -->|controls| DID[DID: #solana-owner]
   end
   BA -->|signs with buyer key| BW
+  BA -->|reads owner + DID at order time| NFT
   CM -->|signs with operator key| OP
-  CM -->|reads owner + DID| NFT
+  CM -->|reads owner + DID before paying| NFT
   DID -.->|names payout wallet| OW
 ```
 
 One delivery, in order:
 
-1. **Order.** The buyer places an order. `buyer_app` signs `CreateDelivery`:
-   0.2 SOL moves from the buyer wallet into an escrow PDA, with the owner wallet
-   stored as the only allowed recipient.
+1. **Order.** The buyer places an order. `buyer_app` reads the car's current
+   owner and payout wallet from peaq, then signs `CreateDelivery`: 0.2 SOL moves
+   from the buyer wallet into an escrow PDA, with that owner wallet stored as the
+   only allowed recipient. If the owner can't be resolved, no order is taken.
 2. **Pick-up.** `car_main` on the car polls the server's HTTPS endpoint for
    the active order. In the other direction, the server reaches the car through
    Staex MCC tunnels (drive commands, camera stream, SSH).
@@ -100,14 +111,37 @@ earlier drone prototype and the PiCar-X.
 
 The Python side uses `solana==0.36.6` / `solders` (`rpi/solana_client.py`).
 
+## PoC 2: handing the car to a new owner
+
+Everything happens in the owner dashboards' browser wallet (keys stay in the
+browser, never on the server):
+
+1. **Transfer.** Owner A sends the Machine-NFT to owner B (`transferFrom` on the
+   peaq MachineRegistry).
+2. **Take over income** ("Einnahmen übernehmen"). Owner B becomes the DID
+   controller and points `#solana-owner` at their own Solana wallet. Between
+   steps 1 and 2 payouts are paused: the payout lookup fails closed instead of
+   paying the previous owner.
+3. **Next delivery.** `buyer_app` resolves owner B at order time and stores B as
+   the escrow's payee; the car checks peaq again before it releases. If the
+   owner changed in between, the release would not match (`WrongSeller`) and the
+   buyer is refunded automatically after `DEADLINE_MINUTES`.
+
+Safety rules in the code: no ownership change while a delivery is active, new
+orders are refused (`409`) until the new owner has signed in once, and every
+reported transfer in the shared transaction view is checked on-chain
+(`car/activity.py`).
+
 ## Repository layout
 
 | Path | Contents |
 |---|---|
 | `anchor/` | Solana escrow program (Anchor) |
 | `car/` | PiCar-X software (`picar_server.py`, `car_main.py`) and the web apps (`buyer_app.py`, `seller_app.py`, `gateway_app.py`) |
+| `car/static/` | Browser wallet (`robopay_wallet.js`: send SOL/PEAQ/NFT, take over income) and the shared transaction view (`robopay_activity.js`) |
+| `car/activity.py` | Shared, on-chain-verified transaction log for the three pages |
 | `car/logging/` | Crash-surviving logs and power monitor for the car |
-| `rpi/` | Shared Solana client, config, peaq ownership lookup (`peaq_ownership.py`), payout-wallet tool (`set_payout_wallet.py`); also the earlier drone/letterbox prototype |
+| `rpi/` | Shared Solana client, config, peaq ownership lookup (`peaq_ownership.py`), payout rules (`payout_policy.py`), payout-wallet tool (`set_payout_wallet.py`), handoff rehearsal script (`peaq_rehearsal.py`); also the earlier drone/letterbox prototype |
 | `mobile/CarOwnerApp/` | Android owner app (mirror of [kevkaseeker-source/CarOwnerApp](https://github.com/kevkaseeker-source/CarOwnerApp)) |
 | `docs/peaq-integration/` | peaq onboarding and ownership-transfer guides |
 | `paper/` | Research paper (Machine Economy Lab) |
@@ -209,6 +243,8 @@ crash and a power/temperature monitor.
 | `REQUIRE_DISTANCE` | `true` | Also require 15–25 cm ultrasonic distance |
 | `CAMERA_FPS` | `2.5` | Camera frame rate (keeps the Pi 5 cool) |
 | `MACHINE_ID`, `PEAQ_RPC_URL` | unset | Pay the peaq Machine-NFT owner instead of `SELLER_PUBKEY` |
+| `PAYOUT_MODE` | `did` | `did` = payee comes from the peaq DID (fails closed); `static` = fixed `SELLER_PUBKEY` |
+| `DEADLINE_MINUTES` | `25` | After this, an undelivered order is refunded to the buyer |
 | `MACHINE_TOKEN` | required | Shared secret the car sends to the buyer app's machine endpoints (`/active_order`, `/delivered`, …); the buyer app refuses to start without it |
 | `JURY_USERNAME`, `JURY_PASSWORD`, `JURY_EXPIRES` | unset | Optional second, time-limited login for judges; rejected automatically after `JURY_EXPIRES` (YYYY-MM-DD) |
 
@@ -229,7 +265,8 @@ python rpi/set_payout_wallet.py <owner Solana pubkey>
 ```
 
 Handing the car to a new owner is three steps (NFT transfer, claim DID control,
-set payout wallet); see `docs/peaq-integration/ownership-transfer-guide.md`.
+set payout wallet); see `docs/peaq-integration/ownership-transfer-guide.md`. The
+owner dashboard does steps 2 and 3 in one click ("Einnahmen übernehmen").
 
 ## Limits of this PoC
 
@@ -237,10 +274,12 @@ set payout wallet); see `docs/peaq-integration/ownership-transfer-guide.md`.
 - The car's operator key is the trusted signer of "delivery happened"; anyone
   with root on the car could sign a release. A co-signing delivery box is
   proposed in `docs/future-work/box-cosign-proof/`.
-- For a new owner to be paid, the buyer app also has to read the owner from the
-  DID at order time, because the program fixes the recipient when the escrow is
-  created. That, and the ownership handoff inside the CarOwnerApp, are the next
-  steps.
+- Proof of arrival is QR code + ultrasonic distance (an indoor stand-in for GPS).
+- The car runs on Wi-Fi/Ethernet; the 4G modem is installed but not yet stable
+  on the Pi 5's power supply.
+- The dashboards' UI text is German.
+- The Android CarOwnerApp (`mobile/CarOwnerApp/`) is the earlier PoC 1 owner
+  app; PoC 2's handoff runs in the browser dashboards.
 
 ## Team
 

@@ -26,9 +26,17 @@ import requests
 from flask import Flask, Response, request, stream_with_context
 
 PORT = int(os.getenv("GATEWAY_PORT", "8000"))
-BUYER_UPSTREAM = "http://localhost:5001"
-SELLER_UPSTREAM = "http://localhost:5002"
+# /buyer/ and /seller/ can be pointed at the Part-2 apps (one system, the car keeps
+# polling /buyer/ unchanged) via BUYER_UPSTREAM / SELLER_UPSTREAM.
+BUYER_UPSTREAM = os.getenv("BUYER_UPSTREAM", "http://localhost:5001")
+SELLER_UPSTREAM = os.getenv("SELLER_UPSTREAM", "http://localhost:5002")
 VERIFIER_UPSTREAM = "http://localhost:5003"
+# Part-2 version (payout follows the Machine-NFT, wallets) runs as separate
+# processes from its own checkout so the submitted /buyer/ and /seller/ stay
+# untouched. Staex Hosting allows only ONE published address per server, so
+# v2 lives under a path prefix on the same domain instead of a new site.
+V2_BUYER_UPSTREAM = os.getenv("V2_BUYER_UPSTREAM", "http://localhost:5011")
+V2_SELLER_UPSTREAM = os.getenv("V2_SELLER_UPSTREAM", "http://localhost:5012")
 
 app = Flask(__name__)
 
@@ -79,10 +87,12 @@ def root():
 <title>RoboPay</title>
 <style>body{background:#111;color:#eee;font-family:system-ui,sans-serif;padding:24px;}
 a{display:block;background:#4ade80;color:#111;text-decoration:none;padding:16px;border-radius:8px;
-margin-bottom:12px;font-weight:600;text-align:center;}</style></head>
+margin-bottom:12px;font-weight:600;text-align:center;}
+a.owner{background:#60a5fa;} a.owner-b{background:#f59e0b;}</style></head>
 <body><h1>RoboPay</h1>
-<a href="/buyer/">Bestellen (Buyer)</a>
-<a href="/seller/">Auto steuern (Seller/Operator)</a>
+<a href="/buyer/">Buyer</a>
+<a class="owner" href="/seller/?owner=A">CarOwner A</a>
+<a class="owner owner-b" href="/seller/?owner=B">CarOwner B</a>
 </body></html>"""
 
 
@@ -96,6 +106,18 @@ def buyer_proxy(subpath):
 @app.route("/seller/<path:subpath>", methods=["GET", "POST"])
 def seller_proxy(subpath):
     return _proxy(SELLER_UPSTREAM, subpath, rewrite_prefix="/seller")
+
+
+@app.route("/v2/buyer/", defaults={"subpath": ""}, methods=["GET", "POST"])
+@app.route("/v2/buyer/<path:subpath>", methods=["GET", "POST"])
+def v2_buyer_proxy(subpath):
+    return _proxy(V2_BUYER_UPSTREAM, subpath, rewrite_prefix="/v2/buyer")
+
+
+@app.route("/v2/seller/", defaults={"subpath": ""}, methods=["GET", "POST"])
+@app.route("/v2/seller/<path:subpath>", methods=["GET", "POST"])
+def v2_seller_proxy(subpath):
+    return _proxy(V2_SELLER_UPSTREAM, subpath, rewrite_prefix="/v2/seller")
 
 
 @app.route("/verifier/", defaults={"subpath": ""}, methods=["GET", "POST"])

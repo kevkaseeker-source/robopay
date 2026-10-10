@@ -18,8 +18,10 @@ Run:
 """
 
 import json
+import re
 import os
 import struct
+import threading
 import time
 from io import BytesIO
 from pathlib import Path
@@ -32,7 +34,9 @@ from solders.message import Message
 from solders.system_program import ID as SYSTEM_PROGRAM_ID
 from solders.transaction import Transaction
 
+import activity
 import robopay_common as common
+import wallet_ops
 
 BUYER_KEYPAIR_PATH = os.getenv("BUYER_KEYPAIR_PATH", str(Path(__file__).parent / "buyer.json"))
 PORT = int(os.getenv("BUYER_APP_PORT", "5001"))
@@ -49,13 +53,13 @@ def _load_keypair(path: str) -> Keypair:
 buyer_kp = _load_keypair(BUYER_KEYPAIR_PATH)
 
 
-def create_delivery(lat: float, lon: float, operator_pubkey) -> str:
+def create_delivery(lat: float, lon: float, operator_pubkey, seller_pubkey, deadline: int) -> str:
+    """Fund the escrow. seller_pubkey is the only wallet the program will ever
+    release it to - the car's owner at order time (see place_order)."""
     amount_lamports = int(common.DELIVERY_AMOUNT_SOL * 1_000_000_000)
-    deadline = int(time.time()) + common.DEADLINE_MINUTES * 60
     data = (CREATE_DELIVERY_DISC
             + struct.pack("<Qqqq", amount_lamports, int(lat * 1e7), int(lon * 1e7), deadline))
     escrow_pda = common.derive_escrow_pda(operator_pubkey)
-    seller_pubkey = common.Pubkey.from_string(common.SELLER_PUBKEY)
     accounts = [
         AccountMeta(pubkey=escrow_pda, is_signer=False, is_writable=True),
         AccountMeta(pubkey=buyer_kp.pubkey(), is_signer=True, is_writable=True),
@@ -93,6 +97,8 @@ _force_delivery = False
 app = Flask(__name__)
 MACHINE_PATHS = {"/active_order", "/delivered", "/force_delivery", "/rpi_log", "/register_external_order"}
 common.make_auth(app, "BUYER_USERNAME", "BUYER_PASSWORD", exempt_paths=MACHINE_PATHS)
+activity.register_routes(app, lambda: (_active_order, _tx_history), common.OPERATOR_PUBKEY,
+                         lambda active: str(buyer_kp.pubkey()))
 common.require_machine_token(app, MACHINE_PATHS)
 
 
@@ -114,21 +120,36 @@ def place_order():
     # side (car_main.py now auto-closes the escrow after confirm_delivery).
     if _active_order is not None and _active_order.get("status") == "pending":
         return jsonify({"success": False, "error": "Es läuft bereits eine Bestellung"}), 400
+    if common.is_paused():
+        return jsonify({"success": False,
+                        "error": "Das Auto ist pausiert (Besitzerwechsel laeuft) - bitte spaeter bestellen"}), 409
     body = request.get_json(silent=True) or {}
     lat = float(body.get("lat", common.TARGET_LAT))
     lon = float(body.get("lon", common.TARGET_LON))
     trigger_mode = body.get("trigger_mode") if body.get("trigger_mode") in ("fixed", "agent") else "fixed"
+    # The escrow pays whoever owns the car right now (peaq Machine-NFT -> DID
+    # -> Solana wallet). If that can't be determined, no escrow is created -
+    # there is deliberately no fallback to a configured wallet.
     try:
-        sig = create_delivery(lat, lon, _operator_for_mode(trigger_mode))
+        seller, owner_evm = common._resolve_owner_details()
+    except common.payout_policy.PayoutRefused as e:
+        return jsonify({"success": False, "error": f"Besitzer des Autos nicht ermittelbar: {e}"}), 503
+    if common.handoff_pending((seller, owner_evm)):
+        return jsonify({"success": False, "error": "Das Auto hat einen neuen Besitzer - Bestellungen sind moeglich, "
+                        "sobald er sich einmal in der CarOwnerApp angemeldet hat"}), 409
+    deadline = int(time.time()) + common.DEADLINE_MINUTES * 60
+    try:
+        sig = create_delivery(lat, lon, _operator_for_mode(trigger_mode), seller, deadline)
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
     _active_order = {
         "lat": lat, "lon": lon, "buyer_pubkey": str(buyer_kp.pubkey()),
         "escrow_tx": sig, "status": "pending", "delivery_tx": None, "ordered_at": time.time(),
-        "trigger_mode": trigger_mode,
+        "trigger_mode": trigger_mode, "seller": str(seller), "deadline": deadline,
     }
     _force_delivery = False
-    _tx_history.append({"type": "create_delivery", "sig": sig, "t": time.time()})
+    _tx_history.append({"type": "create_delivery", "sig": sig, "t": time.time(),
+                        "buyer": str(buyer_kp.pubkey()), "seller": str(seller)})
     common.save_state(_active_order, _tx_history)
     return jsonify({"success": True, "tx": sig, "lat": lat, "lon": lon})
 
@@ -170,7 +191,8 @@ def register_external_order():
         "buyer_mode": body.get("buyer_mode", "external"),
     }
     _force_delivery = False
-    _tx_history.append({"type": "create_delivery", "sig": body["escrow_tx"], "t": time.time()})
+    _tx_history.append({"type": "create_delivery", "sig": body["escrow_tx"], "t": time.time(),
+                        "buyer": body["buyer_pubkey"]})
     common.save_state(_active_order, _tx_history)
     return jsonify({"success": True})
 
@@ -210,7 +232,9 @@ def rpi_log():
 
 @app.route("/status")
 def status():
-    return jsonify(_active_order or {"status": "no_order"})
+    d = dict(_active_order or {"status": "no_order"})
+    d.update(paused=common.is_paused(), now=time.time())
+    return jsonify(d)
 
 
 @app.route("/reset", methods=["POST"])
@@ -221,6 +245,37 @@ def reset_order():
     return jsonify({"ok": True})
 
 
+def auto_refund(now=None):
+    """Refund a pending order once its deadline has passed: the program then
+    no longer lets the car release it (DeliveryExpired), so the money would
+    otherwise sit in the escrow. Returns the refund signature, or None."""
+    global _active_order
+    now = time.time() if now is None else now
+    o = _active_order
+    if not o or o.get("status") != "pending" or not o.get("deadline") or now <= o["deadline"]:
+        return None
+    try:
+        sig = cancel_delivery(_operator_for_mode(o.get("trigger_mode", "fixed")))
+    except Exception as e:
+        o["refund_error"] = str(e)
+        common.save_state(_active_order, _tx_history)
+        return None
+    o.update(status="refunded", refund_tx=sig, refund_error=None)
+    _tx_history.append({"type": "cancel_delivery", "sig": sig, "t": now, "auto": True,
+                        "escrow_tx": o.get("escrow_tx")})
+    common.save_state(_active_order, _tx_history)
+    return sig
+
+
+def _auto_refund_loop():
+    while True:
+        time.sleep(30)
+        try:
+            auto_refund()
+        except Exception as e:  # never let the background thread die
+            print("auto_refund failed:", e)
+
+
 @app.route("/cancel", methods=["POST"])
 def cancel_order():
     global _active_order
@@ -229,7 +284,8 @@ def cancel_order():
         sig = cancel_delivery(_operator_for_mode(trigger_mode))
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
-    _tx_history.append({"type": "cancel_delivery", "sig": sig, "t": time.time()})
+    _tx_history.append({"type": "cancel_delivery", "sig": sig, "t": time.time(),
+                        "escrow_tx": (_active_order or {}).get("escrow_tx")})
     _active_order = None
     common.save_state(_active_order, _tx_history)
     return jsonify({"success": True, "tx": sig})
@@ -243,9 +299,85 @@ def clear_history():
     return jsonify({"ok": True})
 
 
+def _buyer_peaq():
+    """The buyer's peaq wallet (key file from BUYER_PEAQ_KEY_PATH), or None."""
+    path = os.getenv("BUYER_PEAQ_KEY_PATH")
+    if not path:
+        return None
+    return wallet_ops.PeaqWallet(Path(path).read_text().strip(), common.PEAQ_RPC_URL)
+
+
 @app.route("/wallet")
 def wallet():
-    return jsonify({"pubkey": str(buyer_kp.pubkey()), "sol": common.get_balance_sol(str(buyer_kp.pubkey()))})
+    peaq = None
+    try:
+        pw = _buyer_peaq()
+        if pw is not None:
+            peaq = {"address": pw.address, "balance": pw.balance()}
+    except Exception as e:
+        peaq = {"error": str(e)}
+    return jsonify({"pubkey": str(buyer_kp.pubkey()), "sol": common.get_balance_sol(str(buyer_kp.pubkey())),
+                    "peaq": peaq})
+
+
+def _amount(raw):
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return v if 0 < v < float("inf") else None
+
+
+@app.route("/wallet/send", methods=["POST"])
+def wallet_send():
+    """Send from the buyer's own wallet: SOL (devnet), PEAQ or a Machine-NFT (peaq mainnet)."""
+    body = request.get_json(silent=True) or {}
+    asset, to = body.get("asset"), str(body.get("to", "")).strip()
+    try:
+        if asset == "sol":
+            try:
+                common.Pubkey.from_string(to)
+            except Exception:
+                return jsonify({"success": False, "error": "keine gueltige Solana-Adresse"}), 400
+            amount = _amount(body.get("amount"))
+            if amount is None:
+                return jsonify({"success": False, "error": "Betrag ungueltig"}), 400
+            sig = wallet_ops.send_sol(common.rpc, buyer_kp, to, amount)
+            activity.add_event({"chain": "solana", "kind": "sol", "tx": sig, "t": time.time(),
+                                "from": str(buyer_kp.pubkey()), "to": to, "amount": amount})
+            return jsonify({"success": True, "tx": sig, "link": common.DEVNET_EXPLORER.format(sig)})
+        if asset not in ("peaq", "nft"):
+            return jsonify({"success": False, "error": "asset muss sol, peaq oder nft sein"}), 400
+        if not re.fullmatch(r"0x[0-9a-fA-F]{40}", to):
+            return jsonify({"success": False, "error": "keine gueltige peaq-Adresse (0x...)"}), 400
+        amount = machine_id = None
+        if asset == "peaq":
+            amount = _amount(body.get("amount"))
+            if amount is None:
+                return jsonify({"success": False, "error": "Betrag ungueltig"}), 400
+        else:
+            try:
+                machine_id = int(str(body.get("machine_id", "")).strip())
+            except ValueError:
+                machine_id = 0
+            if machine_id <= 0:
+                return jsonify({"success": False, "error": "Machine-ID ungueltig"}), 400
+            busy = _active_order is not None and _active_order.get("status") == "pending"
+            if str(machine_id) == str(common.PEAQ_MACHINE_ID) and busy:
+                return jsonify({"success": False, "error": "Waehrend einer Lieferung kann das Auto-NFT nicht "
+                                "uebertragen werden"}), 409
+        pw = _buyer_peaq()
+        if pw is None:
+            return jsonify({"success": False, "error": "Der Buyer hat noch keine peaq-Wallet "
+                            "(BUYER_PEAQ_KEY_PATH nicht gesetzt)"}), 503
+        tx = pw.send_peaq(to, amount) if asset == "peaq" else pw.transfer_nft(machine_id, to)
+        ev = {"chain": "peaq", "kind": asset, "tx": tx, "t": time.time(), "from": pw.address.lower(), "to": to.lower()}
+        ev.update({"amount": amount} if asset == "peaq" else {"token_id": str(machine_id)})
+        activity.add_event(ev)
+        return jsonify({"success": True, "tx": tx, "link": f"https://peaq.subscan.io/tx/{tx}"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
 
 
 @app.route("/operator_wallets")
@@ -301,7 +433,7 @@ INDEX_HTML = """<!doctype html>
   td { padding:4px 0; border-bottom:1px solid #2a2a2a; }
 </style>
 </head>
-<body>
+<body data-role="buyer">
 <h1>RoboPay — Auto bestellen</h1>
 <div class="grid">
 
@@ -326,8 +458,23 @@ INDEX_HTML = """<!doctype html>
   </div>
 
   <div class="panel">
-    <div class="label">Mein Wallet</div>
+    <div class="label">Mein Wallet · Solana Devnet</div>
     <div id="myWallet" class="mono">lädt...</div>
+    <div class="label" style="margin-top:12px;">Mein Wallet · peaq Mainnet</div>
+    <div id="myPeaqWallet" class="mono">lädt...</div>
+  </div>
+
+  <div class="panel">
+    <div class="label">Senden</div>
+    <select id="sendAsset" onchange="updateSendForm()" style="width:100%; padding:8px; background:#111; color:#eee; border:1px solid #333; border-radius:6px;">
+      <option value="sol">SOL (Solana Devnet)</option>
+      <option value="peaq">PEAQ (peaq Mainnet)</option>
+      <option value="nft">Machine-NFT (peaq Mainnet)</option>
+    </select>
+    <input id="sendTo" placeholder="Empfänger (Solana-Adresse)" style="width:100%; margin-top:8px; padding:8px; background:#111; color:#eee; border:1px solid #333; border-radius:6px; box-sizing:border-box;">
+    <input id="sendAmount" placeholder="Betrag SOL" inputmode="decimal" style="width:100%; margin-top:8px; padding:8px; background:#111; color:#eee; border:1px solid #333; border-radius:6px; box-sizing:border-box;">
+    <button style="margin-top:10px;" onclick="sendFromWallet()">Senden</button>
+    <div id="sendResult" style="margin-top:8px; font-size:0.85rem;"></div>
   </div>
 
   <div class="panel">
@@ -342,14 +489,11 @@ INDEX_HTML = """<!doctype html>
     </div>
   </div>
 
-  <div class="panel">
-    <div class="label">Meine Transaktionen</div>
-    <table id="txTable"><tbody></tbody></table>
-    <button class="btn-secondary" onclick="clearHistory()">Verlauf leeren</button>
-  </div>
+  <div class="panel" style="flex-basis:100%;" id="rpActivity"><div class="label">Transaktionen</div>lädt…</div>
 
 </div>
 
+<script src="static/robopay_activity.js"></script>
 <script>
 const TX_LABELS = {
   create_delivery: 'Buyer TX (Escrow-Einzahlung)',
@@ -397,11 +541,23 @@ async function pollStatus() {
     const btn = document.getElementById('orderBtn');
     if (d.status === 'no_order') {
       el.textContent = '— keine aktive Bestellung —';
-      btn.disabled = false; btn.textContent = 'SOL ins Escrow einzahlen (0.20 SOL)';
+      if (d.paused) { btn.disabled = true; btn.textContent = 'Auto pausiert (Besitzerwechsel)'; }
+      else { btn.disabled = false; btn.textContent = 'SOL ins Escrow einzahlen (0.20 SOL)'; }
     } else {
+      if (d.status === 'refunded') {
+        el.innerHTML = `<span class="status-delivered">zurückgebucht</span><br>
+          <span style="font-size:0.85rem;">Das Auto hat die Lieferung nicht innerhalb der Frist bestätigt. Deine 0.20 SOL wurden automatisch zurück in dein Wallet gebucht.</span>
+          <br><a href="https://explorer.solana.com/tx/${d.refund_tx}?cluster=devnet" target="_blank">Rückbuchung ansehen</a>`;
+        btn.disabled = !!d.paused; btn.textContent = d.paused ? 'Auto pausiert (Besitzerwechsel)' : 'SOL ins Escrow einzahlen (0.20 SOL)';
+        document.getElementById('orderResult').dataset.qrShown = '';
+        return;
+      }
       const cls = d.status === 'delivered' ? 'status-delivered' : 'status-pending';
       const modeLabel = d.trigger_mode === 'agent' ? 'KI-Agent' : 'Fester QR-Code';
       el.innerHTML = `<span class="${cls}">${d.status}</span> <span style="color:#888;">(${modeLabel})</span>`;
+      if (d.seller) {
+        el.innerHTML += `<br><span style="color:#888; font-size:0.8rem;">Auszahlung an den Besitzer:</span> <span class="mono">${d.seller.slice(0,4)}…${d.seller.slice(-4)}</span>`;
+      }
       if (d.status === 'delivered') {
         // Delivered doesn't block a new order (see place_order() server-side) -
         // only keep the button disabled while something is actually pending.
@@ -411,6 +567,16 @@ async function pollStatus() {
         }
       } else {
         btn.disabled = true; btn.textContent = 'Bestellung läuft...';
+        // Refund: the program only lets the buyer reclaim the escrow after
+        // its deadline (cancel_delivery), e.g. when the car is off or the
+        // ownership changed during the delivery and the car refused to pay.
+        if (d.deadline) {
+          const left = d.deadline - d.now;
+          el.innerHTML += left > 0
+            ? `<br><span style="color:#888; font-size:0.8rem;">Wird bis ${new Date(d.deadline*1000).toLocaleTimeString()} nicht geliefert, buchen wir deine SOL automatisch zurück.</span>`
+            : `<br><span style="font-size:0.85rem;">Frist abgelaufen - Rückbuchung läuft automatisch.</span>`
+              + (d.refund_error ? ` <button class="btn-secondary" onclick="refund()">Rückerstattung jetzt anfordern</button>` : '');
+        }
         // The QR only used to appear right after clicking the button itself
         // (placeOrder()'s own success handler) - reloading the page, or an
         // order placed some other way, showed nothing at all even though the
@@ -430,48 +596,76 @@ async function pollStatus() {
   } catch (e) {}
 }
 
+async function refund() {
+  try {
+    const r = await fetch('/cancel', { method: 'POST' });
+    const d = await r.json();
+    document.getElementById('orderResult').textContent = d.success
+      ? 'Rückerstattung gesendet: ' + d.tx
+      : 'Rückerstattung fehlgeschlagen: ' + d.error;
+    pollStatus(); if (window.RoboPayUI) RoboPayUI.refresh();
+  } catch (e) {
+    document.getElementById('orderResult').textContent = 'Fehler: ' + e;
+  }
+}
+
+// Address + copy button, then the balance on its own line.
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const addrLine = (a) => `${esc(a)}${window.RoboPayUI ? RoboPayUI.copyButton(a) : ''}`;
+
 async function pollWallet() {
   try {
     const r = await fetch('/wallet');
     const d = await r.json();
-    document.getElementById('myWallet').textContent = `${d.pubkey}\\n${d.sol} SOL`;
+    document.getElementById('myWallet').innerHTML = `${addrLine(d.pubkey)}<br>${esc(d.sol)} SOL`;
+    const pe = document.getElementById('myPeaqWallet');
+    if (!d.peaq) pe.textContent = '— noch keine peaq-Wallet eingerichtet —';
+    else if (d.peaq.error) pe.textContent = 'Fehler: ' + d.peaq.error;
+    else pe.innerHTML = `${addrLine(d.peaq.address)}<br>${d.peaq.balance.toFixed(4)} PEAQ`;
   } catch (e) {}
+}
+
+function updateSendForm() {
+  const a = document.getElementById('sendAsset').value;
+  document.getElementById('sendTo').placeholder = a === 'sol' ? 'Empfänger (Solana-Adresse)' : 'Empfänger (0x…)';
+  document.getElementById('sendAmount').placeholder = a === 'nft' ? 'Machine-ID des NFT' : (a === 'sol' ? 'Betrag SOL' : 'Betrag PEAQ');
+}
+
+async function sendFromWallet() {
+  const asset = document.getElementById('sendAsset').value;
+  const to = document.getElementById('sendTo').value.trim();
+  const val = document.getElementById('sendAmount').value.trim();
+  const what = asset === 'nft' ? `das Machine-NFT ${val}` : `${val} ${asset.toUpperCase()}`;
+  if (!confirm(`${what} an ${to} senden?` + (asset === 'sol' ? '' : ' (peaq Mainnet, echtes Geld)'))) return;
+  const out = document.getElementById('sendResult');
+  out.textContent = 'sende…';
+  try {
+    const body = asset === 'nft' ? { asset, to, machine_id: val } : { asset, to, amount: val };
+    const r = await fetch('/wallet/send', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const d = await r.json();
+    out.innerHTML = d.success ? `Gesendet ✓ <a href="${d.link}" target="_blank">Transaktion ansehen</a>` : 'Fehler: ' + d.error;
+    pollWallet();
+  } catch (e) { out.textContent = 'Fehler: ' + e; }
 }
 
 async function pollOperatorWallets() {
   try {
     const r = await fetch('/operator_wallets');
     const d = await r.json();
-    document.getElementById('fixedOperatorWallet').textContent = `${d.fixed.pubkey}\\n${d.fixed.sol} SOL`;
-    document.getElementById('agentOperatorWallet').textContent = `${d.agent.pubkey}\\n${d.agent.sol} SOL`;
+    document.getElementById('fixedOperatorWallet').innerHTML = `${addrLine(d.fixed.pubkey)}<br>${esc(d.fixed.sol)} SOL`;
+    document.getElementById('agentOperatorWallet').innerHTML = `${addrLine(d.agent.pubkey)}<br>${esc(d.agent.sol)} SOL`;
   } catch (e) {}
 }
 
-async function clearHistory() {
-  await fetch('/clear_history', { method: 'POST' });
-  pollTx();
-}
-
-async function pollTx() {
-  try {
-    const r = await fetch('/transactions');
-    const d = await r.json();
-    const tbody = document.querySelector('#txTable tbody');
-    tbody.innerHTML = d.map(tx =>
-      `<tr><td>${TX_LABELS[tx.type] || tx.type}</td><td><a href="https://explorer.solana.com/tx/${tx.sig}?cluster=devnet" target="_blank">${tx.sig.slice(0,12)}...</a></td></tr>`
-    ).join('') || '<tr><td>— noch keine Transaktionen —</td></tr>';
-  } catch (e) {}
-}
-
-pollStatus(); pollWallet(); pollOperatorWallets(); pollTx();
+pollStatus(); pollWallet(); pollOperatorWallets();
 setInterval(pollStatus, 2000);
 setInterval(pollWallet, 5000);
 setInterval(pollOperatorWallets, 5000);
-setInterval(pollTx, 5000);
 </script>
 </body>
 </html>"""
 
 
 if __name__ == "__main__":
+    threading.Thread(target=_auto_refund_loop, daemon=True, name="auto-refund").start()
     app.run(host="0.0.0.0", port=PORT, threaded=True, debug=False, use_reloader=False)

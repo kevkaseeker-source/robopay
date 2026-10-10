@@ -31,6 +31,10 @@ SELLER_PUBKEY = os.getenv("SELLER_PUBKEY", "7v8TjCEV3n4n6wEQDESaKyyAbCM5c1uijiQN
 # unset, car_main.py and delivery_agent.py both fall back to SELLER_PUBKEY
 # above exactly as before, unchanged.
 MACHINE_ID = int(os.getenv("MACHINE_ID")) if os.getenv("MACHINE_ID") else None
+# Who gets paid (rpi/payout_policy.py): "did" = the Machine-NFT owner's Solana
+# wallet from the peaq DID (needs MACHINE_ID, fails closed); "static" = the
+# fixed SELLER_PUBKEY above, only when set explicitly.
+PAYOUT_MODE = os.getenv("PAYOUT_MODE", "did")
 PEAQ_RPC_URL = os.getenv("PEAQ_RPC_URL", "https://peaq.api.onfinality.io/public")
 
 # Shared secret for the buyer app's machine endpoints (/active_order,

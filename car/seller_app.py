@@ -25,6 +25,7 @@ import os
 import requests
 from flask import Flask, Response, jsonify, request, stream_with_context
 
+import activity
 import mobile_ownership
 import robopay_common as common
 import sensor_logger
@@ -37,7 +38,9 @@ app = Flask(__name__)
 # wallet-signature-based ownership gate instead (see mobile_ownership.py).
 # A static password would be extractable from the CarOwnerApp's public
 # APK, which the /mobile/* endpoints are built to avoid needing at all.
-common.make_auth(app, "SELLER_USERNAME", "SELLER_PASSWORD", exempt_paths=("/mobile/challenge", "/mobile/verify"))
+common.make_auth(app, "SELLER_USERNAME", "SELLER_PASSWORD",
+                 exempt_paths=("/mobile/challenge", "/mobile/verify", "/machine_status"))
+activity.register_routes(app, common.load_state, common.OPERATOR_PUBKEY)
 sensor_logger.start()
 
 
@@ -48,7 +51,41 @@ def index():
 
 @app.route("/wallet")
 def wallet():
-    return jsonify({"pubkey": common.SELLER_PUBKEY, "sol": common.get_balance_sol(common.SELLER_PUBKEY)})
+    """The car's owner as the escrow sees it: the Machine-NFT owner's Solana
+    payout wallet from the peaq DID (or SELLER_PUBKEY in static mode)."""
+    o = common.owner_info()
+    return jsonify({"pubkey": o["solana"], "evm": o["evm"], "mode": o["mode"], "error": o["error"],
+                    "sol": common.get_balance_sol(o["solana"]) if o["solana"] else None})
+
+
+@app.route("/machine_status")
+def machine_status():
+    """Public, read-only: is a delivery running or the car paused? The
+    CarOwnerApp locks its NFT-transfer button while busy (Kevin's rule: the
+    owner must not change during a delivery). Exposes no private data."""
+    active, _ = common.load_state()
+    o = common.owner_info()
+    return jsonify({
+        "busy": bool(active and active.get("status") == "pending"),
+        "paused": common.is_paused(),
+        "handoff_pending": bool(o["solana"]) and common.handoff_pending((o["solana"], o["evm"])),
+        "owner": {"solana": o["solana"], "evm": o["evm"], "error": o["error"]},
+        "machine_id": common.PEAQ_MACHINE_ID,
+    })
+
+
+@app.route("/machine/pause", methods=["POST"])
+def machine_pause():
+    """Stop accepting orders, e.g. right before an ownership handoff."""
+    reason = (request.get_json(silent=True) or {}).get("reason", "")
+    common.set_paused(True, reason)
+    return jsonify({"ok": True, "paused": True})
+
+
+@app.route("/machine/resume", methods=["POST"])
+def machine_resume():
+    common.set_paused(False)
+    return jsonify({"ok": True, "paused": False})
 
 
 @app.route("/operator_wallets")
@@ -62,6 +99,13 @@ def operator_wallets():
     return jsonify({
         "fixed": {"pubkey": common.OPERATOR_PUBKEY, "sol": common.get_balance_sol(common.OPERATOR_PUBKEY)},
     })
+
+
+def _owner_evm():
+    """Machine-NFT owner's peaq address from the DID lookup (cached), else the
+    configured PEAQ_OPERATOR_ADDRESS in static mode."""
+    o = common.owner_info()
+    return o["evm"] or (common.PEAQ_OPERATOR_ADDRESS if o["mode"] == "static" else None)
 
 
 @app.route("/crosschain_wallet")
@@ -81,10 +125,15 @@ def crosschain_wallet():
             "network": "Devnet",
         },
         "peaq": {
-            "address": common.PEAQ_OPERATOR_ADDRESS,
-            "balance": common.get_balance_peaq(common.PEAQ_OPERATOR_ADDRESS),
+            # The NFT's holder as peaq records it right now - shown even while a
+            # handoff is half-done (the payout itself stays fail-closed).
+            "address": common.nft_owner() or _owner_evm(),
             "symbol": "PEAQ",
             "network": "Mainnet",
+        },
+        "payout": {
+            "ready": bool(common.owner_info()["solana"]),
+            "solana": common.owner_info()["solana"],
         },
         "nft": {
             "machine_id": common.PEAQ_MACHINE_ID,
@@ -119,6 +168,9 @@ def mobile_verify():
         )
     except mobile_ownership.OwnershipCheckError as e:
         return jsonify({"error": str(e)}), 403
+    # The DID's payout wallet just proved it is held by whoever signed in -
+    # this unlocks orders after an ownership handoff (robopay_common.handoff_pending).
+    common.acknowledge_owner(pubkey)
 
     try:
         r = requests.get(f"{common.PICAR_SERVER_URL}:8080/debug/frame", timeout=PICAR_TIMEOUT)
@@ -140,8 +192,8 @@ def mobile_verify():
             "network": "Devnet",
         },
         "peaq": {
-            "address": common.PEAQ_OPERATOR_ADDRESS,
-            "balance": common.get_balance_peaq(common.PEAQ_OPERATOR_ADDRESS),
+            "address": _owner_evm(),
+            "balance": common.get_balance_peaq(_owner_evm()) if _owner_evm() else None,
             "symbol": "PEAQ",
             "network": "Mainnet",
         },
@@ -378,33 +430,41 @@ INDEX_HTML = """<!doctype html>
   .wallet-amount { font-size:1rem; font-weight:700; }
   .wallet-addr { font-family:ui-monospace,monospace; font-size:0.72rem; color:#888; word-break:break-all; }
   .net-badge { font-size:0.65rem; text-transform:uppercase; letter-spacing:0.03em; padding:2px 6px; border-radius:4px; background:#2a2a2a; color:#aaa; flex:none; }
+  .rpw-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:12px; margin-top:6px; }
+  .rpw-card { background:#141414; border:1px solid #2a2a2a; border-radius:8px; padding:12px; display:flex; flex-direction:column; gap:6px; min-width:0; }
+  .rpw-qr { background:#fff; padding:6px; border-radius:6px; align-self:flex-start; }
+  #rpWallet input, #rpWallet textarea { background:#111; color:#eee; border:1px solid #333; border-radius:6px; padding:8px; font-size:0.85rem; box-sizing:border-box; width:100%; }
+  .btn-small { background:#4ade80; color:#111; border:none; border-radius:6px; padding:8px 12px; font-weight:600; cursor:pointer; }
+  .btn-small:disabled { background:#444; color:#888; cursor:not-allowed; }
+  .section-title { flex-basis:100%; font-size:0.8rem; letter-spacing:0.08em; text-transform:uppercase; color:#9ca3af; margin-top:8px; }
+  .role-bar { border-radius:8px; padding:14px 18px; margin-bottom:16px; color:#111; display:flex; flex-wrap:wrap; gap:6px 24px; align-items:baseline; }
+  .role-bar b { font-size:1.4rem; }
+  .role-bar .mono { font-size:0.8rem; word-break:break-all; }
+  .role-A { background:#60a5fa; } .role-B { background:#f59e0b; }
 </style>
 </head>
 <body>
 <h1>RoboPay — Auto steuern (Seller/Operator)</h1>
+<div id="rpRole"></div>
 <div class="grid">
 
+  <div class="panel" style="flex-basis:100%;" id="rpWallet"><div class="label">Meine Wallet</div>lädt…</div>
+
+  <div class="section-title">Das Auto</div>
+
   <div class="panel">
-    <div class="label">Owner-Wallet</div>
+    <div class="label">Auto · zahlt aus an (Besitzer laut NFT)</div>
     <div id="ownerWallet" class="mono">lädt...</div>
   </div>
 
   <div class="panel">
-    <div class="label">Operator-Wallet (Escrow-Release)</div>
+    <div class="label">Auto · eigene Wallet (bezahlt die Gebühren)</div>
     <div style="color:#888; font-size:0.75rem;">RPi (fester QR-Code)</div>
     <div id="fixedOperatorWallet" class="mono">lädt...</div>
   </div>
 
   <div class="panel">
-    <div class="label">Wallet</div>
-    <div class="wallet-row">
-      <img class="wallet-icon" src="/static/solana-logo.png" alt="Solana">
-      <div class="wallet-main">
-        <div class="wallet-amount" id="walletSolAmount">lädt...</div>
-        <div class="wallet-addr" id="walletSolAddr"></div>
-      </div>
-      <div class="net-badge" id="walletSolNet">—</div>
-    </div>
+    <div class="label">Auto · Machine-NFT und Besitzer</div>
     <div class="wallet-row">
       <img class="wallet-icon" src="/static/peaq-logo.png" alt="peaq">
       <div class="wallet-main">
@@ -429,6 +489,7 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="net-badge" id="walletNftNet">—</div>
     </div>
+    <div id="walletPayoutState" style="font-size:0.8rem; margin-top:6px;"></div>
   </div>
 
   <div class="panel">
@@ -436,10 +497,6 @@ INDEX_HTML = """<!doctype html>
     <div id="orderStatus">— keine aktive Bestellung —</div>
   </div>
 
-  <div class="panel">
-    <div class="label">Escrow-Release-Transaktionen</div>
-    <table id="txTable"><tbody></tbody></table>
-  </div>
 
   <div class="panel" style="flex-basis:100%;">
     <div class="label">Auto — Live-Kamera, Sensoren &amp; Steuerung</div>
@@ -468,14 +525,28 @@ INDEX_HTML = """<!doctype html>
     </div>
   </div>
 
+  <div class="panel" style="flex-basis:100%;" id="rpActivity"><div class="label">Transaktionen</div>lädt…</div>
+
 </div>
 
 <script>
+// Which CarOwner (A/B) an address belongs to, if that owner's wallet is set up
+// in this browser (robopay_wallet.js). Empty string when unknown.
+// Falls back to the owner addresses the server knows (robopay_activity.js).
+const ROLE_NAMES = { A: 'CarOwner A', B: 'CarOwner B', buyer: 'Buyer', car: 'Auto' };
+const whoIs = (a) => ((window.RoboPayWallet && window.RoboPayWallet.whoIs) ? window.RoboPayWallet.whoIs(a) : '')
+  || ((window.RoboPayUI && ROLE_NAMES[RoboPayUI.roleOf(a)]) || '');
+const withWho = (a) => { const w = whoIs(a); return w ? `  = ${w}` : ''; };
+// Address + copy button.
+const addrHtml = (a) => escapeHtml(a) + (window.RoboPayUI ? RoboPayUI.copyButton(a) : '');
+
 async function pollWallet() {
   try {
     const r = await fetch('/wallet');
     const d = await r.json();
-    document.getElementById('ownerWallet').textContent = `${d.pubkey}\\n${d.sol} SOL`;
+    document.getElementById('ownerWallet').innerHTML = d.pubkey
+      ? `${addrHtml(d.pubkey)}${escapeHtml(withWho(d.pubkey))}<br>${escapeHtml(d.sol)} SOL`
+      : '<span style="color:#facc15;">— niemand: Besitzerwechsel läuft. Der neue Besitzer muss „Einnahmen übernehmen“. —</span>';
   } catch (e) {}
 }
 
@@ -483,7 +554,7 @@ async function pollOperatorWallets() {
   try {
     const r = await fetch('/operator_wallets');
     const d = await r.json();
-    document.getElementById('fixedOperatorWallet').textContent = `${d.fixed.pubkey}\\n${d.fixed.sol} SOL`;
+    document.getElementById('fixedOperatorWallet').innerHTML = `${addrHtml(d.fixed.pubkey)}<br>${escapeHtml(d.fixed.sol)} SOL`;
   } catch (e) {}
 }
 
@@ -491,11 +562,14 @@ async function pollCrosschainWallet() {
   try {
     const r = await fetch('/crosschain_wallet');
     const d = await r.json();
-    document.getElementById('walletSolAmount').textContent = `${d.solana.balance ?? '—'} ${d.solana.symbol}`;
-    document.getElementById('walletSolAddr').textContent = d.solana.address;
-    document.getElementById('walletSolNet').textContent = d.solana.network;
-    document.getElementById('walletPeaqAmount').textContent = `${d.peaq.balance ?? '—'} ${d.peaq.symbol}`;
-    document.getElementById('walletPeaqAddr').textContent = d.peaq.address;
+    // Only what belongs to the car: who owns its NFT. The owner's own balance
+    // is private to the owner and shows in their wallet box below.
+    document.getElementById('walletPeaqAmount').textContent = 'Besitzer (peaq)' + withWho(d.peaq.address);
+    // Between "NFT sent" and "Einnahmen übernehmen" nobody gets paid.
+    document.getElementById('walletPayoutState').innerHTML = (d.payout && !d.payout.ready && d.peaq.address)
+      ? `<span style="color:#facc15;">Auszahlung pausiert: ${escapeHtml(whoIs(d.peaq.address) || 'der neue Besitzer')} muss noch „Einnahmen übernehmen“ klicken.</span>`
+      : '';
+    document.getElementById('walletPeaqAddr').innerHTML = d.peaq.address ? addrHtml(d.peaq.address) : '—';
     document.getElementById('walletPeaqNet').textContent = d.peaq.network;
     document.getElementById('walletNftId').textContent = d.nft.machine_id;
     document.getElementById('walletNftNet').textContent = d.nft.network;
@@ -529,19 +603,6 @@ function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
-async function pollTx() {
-  try {
-    const r = await fetch('/transactions');
-    const d = await r.json();
-    const tbody = document.querySelector('#txTable tbody');
-    tbody.innerHTML = d.map(tx => {
-      const safeEscrowTx = escapeHtml(tx.escrow_tx);
-      const galleryLink = tx.escrow_tx
-        ? ` &middot; <a href="gallery/${safeEscrowTx}">Sensordaten</a>` : '';
-      return `<tr><td>Escrow-Release</td><td><a href="https://explorer.solana.com/tx/${escapeHtml(tx.sig)}?cluster=devnet" target="_blank">${escapeHtml(tx.sig.slice(0,12))}...</a>${galleryLink}</td></tr>`;
-    }).join('') || '<tr><td>— noch keine Auszahlungen —</td></tr>';
-  } catch (e) {}
-}
 
 async function drive(speed, angle) {
   try {
@@ -587,13 +648,19 @@ setInterval(async () => {
   } catch (e) {}
 }, 1000);
 
-pollWallet(); pollOperatorWallets(); pollCrosschainWallet(); pollOrder(); pollTx();
+pollWallet(); pollOperatorWallets(); pollCrosschainWallet(); pollOrder();
 setInterval(pollWallet, 5000);
 setInterval(pollOperatorWallets, 5000);
 setInterval(pollCrosschainWallet, 10000);
 setInterval(pollOrder, 2000);
-setInterval(pollTx, 5000);
 </script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"></script>
+<!-- @solana/web3.js's browser build needs a global Buffer to serialize transactions -->
+<script type="module">import { Buffer } from 'https://cdn.jsdelivr.net/npm/buffer@6.0.3/+esm'; window.Buffer = window.Buffer || Buffer;</script>
+<script src="https://unpkg.com/@solana/web3.js@1.95.3/lib/index.iife.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tweetnacl/1.0.3/nacl-fast.min.js"></script>
+<script src="static/robopay_activity.js"></script>
+<script src="static/robopay_wallet.js"></script>
 </body>
 </html>"""
 
