@@ -1,0 +1,13 @@
+[features]
+seeds = false
+skip-lint = false
+
+[programs.devnet]
+machine_split = "Fg6PaFpoGXkYsidMpWxTWqkZL6D5F5F5y7gVZV5V1Gk"
+
+[provider]
+cluster = "devnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "yarn mocha -t 1000000 tests/**/*.ts"
