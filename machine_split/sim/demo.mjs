@@ -1,4 +1,5 @@
 function splitAmount(amount, bps) {
+  if (bps.reduce((a, b) => a + b, 0) !== 10000) throw new Error('bps must sum to 10000');
   let assigned = 0;
   return bps.map((share, i) => {
     if (i === bps.length - 1) return amount - assigned;
@@ -6,6 +7,18 @@ function splitAmount(amount, bps) {
     assigned += part;
     return part;
   });
+}
+
+if (process.argv[2] === 'drone') {
+  const names = ['Alice', 'Bob', 'Carla', 'Deniz'];
+  const droneBps = [2500, 2500, 2500, 2500];
+  const payment = 200_000_000; // 0.20 SOL
+  console.log('RoboPay machine-split demo — delivery drone "D-01"');
+  console.log('4 co-owners, each holds an NFT for 25 %\n');
+  console.log(`Delivery paid: ${(payment / 1e9).toFixed(2)} SOL → split automatically:`);
+  splitAmount(payment, droneBps).forEach((v, i) => console.log(`  NFT #${i + 1}  ${names[i].padEnd(6)} 25 %  → ${(v / 1e9).toFixed(3)} SOL`));
+  try { splitAmount(payment, [2500, 2500, 2500, 2000]); } catch { console.log('\nRejected: shares 25+25+25+20 % = 95 % (must be 100 %).'); }
+  process.exit(0);
 }
 
 const owners = ['DHL-like company', 'Alice', 'Bob'];
